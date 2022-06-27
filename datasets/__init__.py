@@ -80,3 +80,35 @@ def get_ds(root, ds_name, split, transform, target_transform=None):
 
     return ds
 
+
+def get_ood_trf(ds_name_id, ds_name_ood, stage):
+    mean, std = get_ds_info(ds_name_id, stage)
+
+    if stage == 'train':
+        ood_trf = {
+            'tiny_images': [
+                transforms.ToTensor(), 
+                transforms.ToPILImage(), 
+                transforms.RandomHorizontalFlip(), 
+                transforms.RandomCrop(32, padding=4), 
+                transforms.ToTensor(),
+                transforms.Normalize(mean, std)
+            ],
+        }
+    elif stage == 'test':
+        ood_trf = {
+            'svhn': [transforms.ToTensor(), transforms.Normalize(mean, std)],
+            'places365_10k': [transforms.Resize(32), transforms.CenterCrop(32), transforms.ToTensor(), transforms.Normalize(mean, std)],
+            'lsunc': [transforms.CenterCrop(32), transforms.ToTensor(), transforms.Normalize(mean, std)],
+            'lsunr': [transforms.ToTensor(), transforms.Normalize(mean, std)],
+            'tinc': [transforms.CenterCrop(32), transforms.ToTensor(), transforms.Normalize(mean, std)],
+            'tinr': [transforms.ToTensor(), transforms.Normalize(mean, std)],
+            'dtd': [transforms.Resize(32), transforms.CenterCrop(32), transforms.ToTensor(), transforms.Normalize(mean, std)],
+            'isun': [transforms.ToTensor(), transforms.Normalize(mean, std)],
+            'cifar10': [transforms.ToTensor(), transforms.Normalize(mean, std)],
+            'cifar100': [transforms.ToTensor(), transforms.Normalize(mean, std)]
+        }
+    else:
+        raise Exception('---> Dataset Stage: {} invalid'.format(stage))
+
+    return transforms.Compose(ood_trf[ds_name_ood])

@@ -11,13 +11,12 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-import torchvision.transforms as transforms
 import torch.backends.cudnn as cudnn
 from torch.utils.data import DataLoader
 
 from models import get_clf
 from utils import setup_logger
-from datasets import get_ds_info, get_ds_trf, get_ds
+from datasets import get_ds_info, get_ds_trf, get_ood_trf, get_ds
 
 def init_seeds(seed):
     random.seed(seed)
@@ -113,7 +112,8 @@ def main(args):
 
     # init dataset & dataloader
     train_trf_id = get_ds_trf(args.id, stage='train')
-    train_trf_ood = transforms.Compose([transforms.ToTensor(), transforms.ToPILImage(), train_trf_id])
+    # train_trf_ood = transforms.Compose([transforms.ToTensor(), transforms.ToPILImage(), train_trf_id])
+    train_trf_ood = get_ood_trf(args.id, args.ood, 'train')
     test_trf = get_ds_trf(args.id, stage='test')
 
     train_set_id = get_ds(root=args.data_dir, ds_name=args.id, split='train', transform=train_trf_id)
