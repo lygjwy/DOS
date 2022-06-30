@@ -1,5 +1,6 @@
 .vscode/
 __pycache__/
 outputs/
+results/
 tmp/
 temp/

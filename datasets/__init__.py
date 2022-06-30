@@ -82,7 +82,7 @@ def get_ds(root, ds_name, split, transform, target_transform=None):
 
 
 def get_ood_trf(ds_name_id, ds_name_ood, stage):
-    mean, std = get_ds_info(ds_name_id, stage)
+    mean, std = get_ds_info(ds_name_id, 'mean_and_std')
 
     if stage == 'train':
         ood_trf = {

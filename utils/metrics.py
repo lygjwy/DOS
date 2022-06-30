@@ -33,13 +33,14 @@ def auc_roc_pr(score, label):
 
     return auroc, aupr_id, aupr_ood
 
-def compute_all_metrics(score, label, verbose=True):
+def compute_all_metrics(score, label, verbose=False):
     tpr = 0.95
     fpr_at_tpr = fpr_tpr(score, label, tpr)
     auroc, aupr_id, aupr_ood = auc_roc_pr(score, label)
 
     if verbose:
-        print('[auroc: {:.4f}, aupr_in: {:.4f}, aupr_out: {:.4f}, fpr@95tpr: {:.4f}]'.format(auroc, aupr_in, aupr_out, fpr_at_tpr))
-        results = [fpr_at_tpr, auroc, aupr_id, aupr_ood]
+        print('[auroc: {:.4f}, aupr_in: {:.4f}, aupr_out: {:.4f}, fpr@95tpr: {:.4f}]'.format(auroc, aupr_id, aupr_ood, fpr_at_tpr))
+    
+    results = [fpr_at_tpr, auroc, aupr_id, aupr_ood]
     
     return results

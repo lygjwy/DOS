@@ -14,19 +14,32 @@ class TinyImages(Dataset):
     def __init__(self, root, transform=None, exclude_cifar=True):
 
         data_dir = Path(root) / 'tiny_images'
-        if exclude_cifar:
-            data_file_path = data_dir / 'tiny_images_wo_cifar.bin'
-            self.num = 79302017 - 132416
-        else:
-            data_file_path = data_dir / 'tiny_images.bin'
-            self.num = 79302017
+        idx_file_path = data_dir / '80mn_cifar_idxs.txt'
+        
+        self.data_file = open(data_dir / 'tiny_images.bin', 'rb')
+        
+        self.num = 79302017
+        self.offset = 0 # offset index
 
-        self.data_file = open(data_file_path, 'rb')
         self.transform = transform
+        self.exclude_cifar = exclude_cifar
 
+        if exclude_cifar:
+            # indices in file take the 80mn database to start at 1, hence "- 1"
+            with open(idx_file_path, 'r') as idxs:
+                cifar_idxs = [int(idx)-1 for idx in idxs]
+
+            # hash table option
+            cifar_idxs = set(cifar_idxs)
+            self.in_cifar = lambda x: x in cifar_idxs
 
     def __getitem__(self, index):
-        
+        index = (index + self.offset) % self.num
+
+        if self.exclude_cifar:
+            while self.in_cifar(index):
+                index = np.random.randint(self.num)
+
         img = self._load_image(index)
         img = Image.fromarray(img)
         
