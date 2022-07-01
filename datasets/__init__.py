@@ -67,8 +67,8 @@ def get_ds_trf(ds_name, stage):
 def get_ds(root, ds_name, split, transform, target_transform=None):
     
     if ds_name == 'tiny_images':
-        print('---> Loading Tiny Images (split={} ignored)'.format(split))
-        ds = TinyImages(root, transform)
+        print('---> Loading Tiny Images (split={} for partition)'.format(split))
+        ds = TinyImages(root, transform, split=split)
     else:
         ds = NamedDatasetWithMeta(
             root=root,
@@ -87,8 +87,8 @@ def get_ood_trf(ds_name_id, ds_name_ood, stage):
     if stage == 'train':
         ood_trf = {
             'tiny_images': [
-                transforms.ToTensor(), 
-                transforms.ToPILImage(), 
+                # transforms.ToTensor(), 
+                # transforms.ToPILImage(), 
                 transforms.RandomHorizontalFlip(), 
                 transforms.RandomCrop(32, padding=4), 
                 transforms.ToTensor(),

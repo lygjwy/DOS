@@ -57,12 +57,12 @@ def main(args):
         torch.cuda.set_device(gpu_idx)
         clf = nn.DataParallel(clf)
         clf.cuda()
-        torch.cuda.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
     cudnn.benchmark = True
 
     begin_time = time.time()
     get_msp_score(test_loader_ood, clf)
-    print('Time: {:d}s'.format(time.time() - begin_time))
+    print('Time: {:d}s'.format(int(time.time() - begin_time)))
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Inference on auxiliary OOD training data')

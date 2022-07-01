@@ -1,5 +1,5 @@
 '''
-Tuning or Training CLF with Outlier Exposure
+Tuning or training with auxiliary OOD training data
 '''
 
 import copy
@@ -10,9 +10,10 @@ import numpy as np
 from pathlib import Path
 
 import torch
+from torch import nn 
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
-from torch.utils.data import DataLoader
+from torch.utils.data import WeightedRandomSampler, DataLoader
 
 from models import get_clf
 from utils import setup_logger
@@ -23,17 +24,42 @@ def init_seeds(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
+def get_resample_weights(data_loader, clf, weight_type):
+    '''
+    Calculating weights for resampling
+    '''
+    clf.eval()
+
+    logit_maxs, prob_maxs = [], []
+    for sample in data_loader:
+        data = sample['data'].cuda()
+
+        with torch.no_grad():
+            logit = clf(data)
+            prob = torch.softmax(logit, dim=1)
+
+            logit_max, _ = torch.max(logit, dim=1)
+            logit_maxs.extend(F.softplus(logit_max).tolist())
+
+            prob_max, _ = torch.max(prob, dim=1)
+            prob_maxs.extend(prob_max.tolist())
+
+    if weight_type == 'logit':
+        return logit_maxs
+    elif weight_type == 'prob':
+        return prob_maxs
+    else:
+        raise RuntimeError('<<< Invalid weight type: {}'.format(weight_type))
+
 def cosine_annealing(step, total_steps, lr_max, lr_min):
     return lr_min + (lr_max - lr_min) * 0.5 * (1 + np.cos(step / total_steps * np.pi))
 
-# Training function
 def train(data_loader_id, data_loader_ood, net, optimizer, scheduler):
     net.train()
 
     total, correct = 0, 0
     total_loss = 0.0
 
-    # start at a random point of the outlier dataset; this induces more randomness without obliterating locality
     for sample_id, sample_ood in zip(data_loader_id, data_loader_ood):
         num_id = sample_id['data'].size(0)
 
@@ -42,9 +68,7 @@ def train(data_loader_id, data_loader_ood, net, optimizer, scheduler):
 
         # forward
         logit = net(data)
-
         loss = F.cross_entropy(logit[:num_id], target)
-        # cross-entropy from softmax distribution to uniform distribution
         loss += 0.5 * -(logit[num_id:].mean(dim=1) - torch.logsumexp(logit[num_id:], dim=1)).mean()
 
         # backward
@@ -67,17 +91,16 @@ def train(data_loader_id, data_loader_ood, net, optimizer, scheduler):
         'cla_acc': 100. * correct / total
     }
 
-# Test function
-def test(data_loader_id, net):
+def test(data_loader, net):
     net.eval()
 
     total, correct = 0, 0
     total_loss = 0.0
 
     with torch.no_grad():
-        for sample_id in data_loader_id:
-            data = sample_id['data'].cuda()
-            target = sample_id['label'].cuda()
+        for sample in data_loader:
+            data = sample['data'].cuda()
+            target = sample['label'].cuda()
 
             # forward
             logit = net(data)
@@ -86,52 +109,45 @@ def test(data_loader_id, net):
             _, pred = logit.max(dim=1)
             correct += pred.eq(target).sum().item()
             total += target.size(0)
-    
+
     # average on sample
-    print('[cla loss: {:.8f} | cla acc: {:.4f}%]'.format(total_loss / len(data_loader_id.dataset), 100. * correct / total))
+    print('[cla loss: {:.8f} | cla acc: {:.4f}%]'.format(total_loss / len(data_loader.dataset), 100. * correct / total))
     return {
-        'cla_loss': total_loss / len(data_loader_id.dataset),
+        'cla_loss': total_loss / len(data_loader.dataset),
         'cla_acc': 100. * correct / total
     }
 
 def main(args):
-    # init random seed
     init_seeds(args.seed)
 
-    # specify output dir
     if args.pretrain is not None:
-        exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / (args.arch + '-' + 'tune')
+        exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, 'tune', args.training])
     else:
-        exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / (args.arch + '-' + 'train')
-    
-    print('>>> Output Dir {}'.format(str(exp_path)))
+        exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, 'train', args.training])
+
+    print('>>> Output dir: {}'.format(str(exp_path)))
     exp_path.mkdir(parents=True, exist_ok=True)
 
-    # record log
     setup_logger(str(exp_path), 'console.log')
 
-    # init dataset & dataloader
-    train_trf_id = get_ds_trf(args.id, stage='train')
-    # train_trf_ood = transforms.Compose([transforms.ToTensor(), transforms.ToPILImage(), train_trf_id])
+    train_trf_id = get_ds_trf(args.id, 'train')
     train_trf_ood = get_ood_trf(args.id, args.ood, 'train')
-    test_trf = get_ds_trf(args.id, stage='test')
+    test_trf = get_ds_trf(args.id, 'test')
 
     train_set_id = get_ds(root=args.data_dir, ds_name=args.id, split='train', transform=train_trf_id)
-    train_set_ood = get_ds(root=args.data_dir, ds_name=args.ood, split=None, transform=train_trf_ood)
+    train_set_ood = get_ds(root=args.data_dir, ds_name=args.ood, split='wo_cifar', transform=train_trf_ood)
     test_set = get_ds(root=args.data_dir, ds_name=args.id, split='test', transform=test_trf)
 
     train_loader_id = DataLoader(train_set_id, batch_size=args.batch_size, shuffle=True, num_workers=args.prefetch, pin_memory=True)
-    train_loader_ood = DataLoader(train_set_ood, batch_size=2*args.batch_size, shuffle=False, num_workers=args.prefetch, pin_memory=True)
+    data_loader_ood = DataLoader(train_set_ood, batch_size=args.batch_size_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
     test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=args.prefetch, pin_memory=True)
-    
+
     print('>>> ID: {} - OOD: {}'.format(args.id, args.ood))
 
-    # instantiate CLF, optimizer & scheduler 
     num_classes = len(get_ds_info(args.id, 'classes'))
     print('>>> CLF: {}'.format(args.arch))
     clf = get_clf(args.arch, num_classes)
 
-    # load from pre-trained classifier
     if args.pretrain is not None:
         clf_path = Path(args.pretrain)
 
@@ -139,16 +155,17 @@ def main(args):
             clf_state = torch.load(str(clf_path))
             cla_acc = clf_state['cla_acc']
             clf.load_state_dict(clf_state['state_dict'])
-            print('>>> load classifier from {} (classifiication acc {:.4f}%)'.format(str(clf_path), cla_acc))
+            print('>>> load CLF from {} (classifiication acc {:.4f}%)'.format(str(clf_path), cla_acc))
         else:
-            raise RuntimeError('<--- invlaid classifier path: {}'.format(str(clf_path)))
-
-    # move CLF to gpu device
+            raise RuntimeError('<<< invalid classifier path: {}'.format(str(clf_path)))
+    
+    # move CLF to gpus
     gpu_idx = int(args.gpu_idx)
     if torch.cuda.is_available():
         torch.cuda.set_device(gpu_idx)
+        clf = nn.DataParallel(clf)
         clf.cuda()
-        torch.cuda.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
     cudnn.benchmark = True
 
     optimizer = torch.optim.SGD(clf.parameters(), lr=args.lr, weight_decay=args.weight_decay, momentum=args.momentum, nesterov=True)
@@ -162,15 +179,20 @@ def main(args):
         )
     )
 
-    # train & test
     begin_time = time.time()
     start_epoch = 1
     cla_acc = 0.0
 
     for epoch in range(start_epoch, args.epochs+1):
 
+        # resampling auxiliary OOD training samples by weights
+        resample_weights_ood = get_resample_weights(data_loader_ood, clf, args.weight_type)
+        weighted_train_sampler_ood = WeightedRandomSampler(resample_weights_ood, num_samples=2 * len(train_set_id), replacement=args.replacement)
+
+        train_loader_ood = DataLoader(train_set_ood, batch_size=2*args.batch_size, sampler=weighted_train_sampler_ood, num_workers=args.prefetch, pin_memory=True)
+
         train(train_loader_id, train_loader_ood, clf, optimizer, scheduler)
-        val_metrics = test(test_loader, clf)
+        val_metrics  = test(test_loader, clf)
         cla_acc = val_metrics['cla_acc']
 
         print(
@@ -181,7 +203,6 @@ def main(args):
             flush=True
         )
 
-    # training done, save the last state
     torch.save({
         'epoch': epoch,
         'arch': args.arch,
@@ -195,6 +216,8 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', help='directory to store datasets', default='/data/cv')
     parser.add_argument('--id', type=str, default='cifar10')
     parser.add_argument('--ood', type=str, default='tiny_images')
+    parser.add_argument('--weight_type', type=str, default='prob', choices=['prob', 'logit'])
+    parser.add_argument('--replacement', type=bool, default=True)
     parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='outputs')
     parser.add_argument('--arch', type=str, default='wrn40')
     parser.add_argument('--pretrain', type=str, default=None, help='path to pre-trained model')
@@ -203,8 +226,10 @@ if __name__ == '__main__':
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=128)
+    parser.add_argument('--batch_size_ood', type=int, default=3072)
     parser.add_argument('--prefetch', type=int, default=0, help='number of dataloader workers')
     parser.add_argument('--gpu_idx', help='used gpu idx', type=int, default=0)
     args = parser.parse_args()
     
     main(args)
+

@@ -11,19 +11,22 @@ from torch.utils.data import Dataset
 
 class TinyImages(Dataset):
 
-    def __init__(self, root, transform=None, exclude_cifar=True):
+    def __init__(self, root, transform=None, split='wo_cifar'):
 
         data_dir = Path(root) / 'tiny_images'
-        if exclude_cifar:
+        
+        if split == 'wo_cifar':
             data_file_path = data_dir / 'tiny_images_wo_cifar.bin'
-            self.num = 79302017 - 132416
+            self.num = 79169608
+        elif split == 'w_cifar':
+            data_file_path = data_dir / 'tiny_images_w_cifar.bin'
+            self.num = 132409
         else:
             data_file_path = data_dir / 'tiny_images.bin'
             self.num = 79302017
 
         self.data_file = open(data_file_path, 'rb')
         self.transform = transform
-
 
     def __getitem__(self, index):
         
