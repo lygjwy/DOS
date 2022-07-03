@@ -8,6 +8,7 @@ from pathlib import Path
 # import sklearn.covariance
 
 import torch
+import torch.nn as nn
 import torch.backends.cudnn as cudnn
 from torch.utils.data import DataLoader
 
@@ -50,6 +51,7 @@ def main(args):
     # load CLF
     num_classes = len(get_ds_info(args.id, 'classes'))
     clf = get_clf(args.arch, num_classes)
+    clf = nn.DataParallel(clf)
     clf_path = Path(args.pretrain)
 
     if clf_path.is_file():
@@ -122,7 +124,7 @@ if __name__ == '__main__':
     # parser.add_argument('--temperature', type=int, default=1000)
     # parser.add_argument('--magnitude', type=float, default=0.0014)
     parser.add_argument('--batch_size', type=int, default=200)
-    parser.add_argument('--prefetch', type=int, default=4)
+    parser.add_argument('--prefetch', type=int, default=16)
     parser.add_argument('--arch', type=str, default='wrn40')
     parser.add_argument('--pretrain', type=str, default=None, help='path to pre-trained model')
     parser.add_argument('--gpu_idx', type=int, default=0)

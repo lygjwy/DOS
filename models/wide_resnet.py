@@ -55,7 +55,7 @@ class Wide_ResNet(nn.Module):
         n = int((depth-4)/6)
         k = widen_factor
 
-        print('Wide ResNet %dx%d' % (depth, k))
+        # print('Wide ResNet %dx%d' % (depth, k))
         nStages = [16, 16*k, 32*k, 64*k]
 
         self.conv1 = conv3x3(3, nStages[0])

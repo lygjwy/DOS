@@ -120,6 +120,7 @@ def main(args):
     num_classes = len(get_ds_info(args.id, 'classes'))
     print('>>> CLF: {}'.format(args.arch))
     clf = get_clf(args.arch, num_classes)
+    clf = nn.DataParallel(clf)
 
     if args.pretrain is not None:
         clf_path = Path(args.pretrain)
@@ -136,7 +137,6 @@ def main(args):
     gpu_idx = int(args.gpu_idx)
     if torch.cuda.is_available():
         torch.cuda.set_device(gpu_idx)
-        clf = nn.DataParallel(clf)
         clf.cuda()
         torch.cuda.manual_seed_all(args.seed)
     cudnn.benchmark = True
@@ -211,7 +211,7 @@ if __name__ == '__main__':
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--prefetch', type=int, default=0, help='number of dataloader workers')
+    parser.add_argument('--prefetch', type=int, default=16, help='number of dataloader workers')
     parser.add_argument('--gpu_idx', help='used gpu idx', type=int, default=0)
     args = parser.parse_args()
     

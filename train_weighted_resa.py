@@ -13,7 +13,7 @@ import torch
 from torch import nn 
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
-from torch.utils.data import WeightedRandomSampler, DataLoader
+from torch.utils.data import Subset, SubsetRandomSampler, WeightedRandomSampler, DataLoader
 
 from models import get_clf
 from utils import setup_logger
@@ -120,10 +120,10 @@ def test(data_loader, net):
 def main(args):
     init_seeds(args.seed)
 
-    if args.pretrain is not None:
-        exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, 'tune', args.training])
+    if args.replacement:
+        exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, 'tune', 'weighted', args.training, args.weight_type, 'wr'])
     else:
-        exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, 'train', args.training])
+        exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, 'tune', 'weighted', args.training, args.weight_type, 'wor'])
 
     print('>>> Output dir: {}'.format(str(exp_path)))
     exp_path.mkdir(parents=True, exist_ok=True)
@@ -131,15 +131,12 @@ def main(args):
     setup_logger(str(exp_path), 'console.log')
 
     train_trf_id = get_ds_trf(args.id, 'train')
-    train_trf_ood = get_ood_trf(args.id, args.ood, 'train')
     test_trf = get_ds_trf(args.id, 'test')
 
     train_set_id = get_ds(root=args.data_dir, ds_name=args.id, split='train', transform=train_trf_id)
-    train_set_ood = get_ds(root=args.data_dir, ds_name=args.ood, split='wo_cifar', transform=train_trf_ood)
     test_set = get_ds(root=args.data_dir, ds_name=args.id, split='test', transform=test_trf)
 
     train_loader_id = DataLoader(train_set_id, batch_size=args.batch_size, shuffle=True, num_workers=args.prefetch, pin_memory=True)
-    data_loader_ood = DataLoader(train_set_ood, batch_size=args.batch_size_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
     test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=args.prefetch, pin_memory=True)
 
     print('>>> ID: {} - OOD: {}'.format(args.id, args.ood))
@@ -147,6 +144,7 @@ def main(args):
     num_classes = len(get_ds_info(args.id, 'classes'))
     print('>>> CLF: {}'.format(args.arch))
     clf = get_clf(args.arch, num_classes)
+    clf = nn.DataParallel(clf)
 
     if args.pretrain is not None:
         clf_path = Path(args.pretrain)
@@ -163,7 +161,6 @@ def main(args):
     gpu_idx = int(args.gpu_idx)
     if torch.cuda.is_available():
         torch.cuda.set_device(gpu_idx)
-        clf = nn.DataParallel(clf)
         clf.cuda()
         torch.cuda.manual_seed_all(args.seed)
     cudnn.benchmark = True
@@ -183,14 +180,28 @@ def main(args):
     start_epoch = 1
     cla_acc = 0.0
 
+    train_trf_ood = get_ood_trf(args.id, args.ood, 'train')
+    all_set_ood = get_ds(root=args.data_dir, ds_name=args.ood, split='wo_cifar', transform=train_trf_ood)
+
+    if args.training == 'fix':
+        # random select 2 ** 24
+        indices_ood = torch.randperm(len(all_set_ood))[:2 ** 24].tolist()
+        train_set_ood = Subset(all_set_ood, indices_ood)
+    
+
     for epoch in range(start_epoch, args.epochs+1):
+
+        if args.training == 'var':
+            indices_ood = torch.randperm(len(all_set_ood))[:2 ** 24].tolist()
+            train_set_ood = Subset(all_set_ood, indices_ood)
+        
+        data_loader_ood = DataLoader(train_set_ood, batch_size=args.batch_size_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
 
         # resampling auxiliary OOD training samples by weights
         resample_weights_ood = get_resample_weights(data_loader_ood, clf, args.weight_type)
         weighted_train_sampler_ood = WeightedRandomSampler(resample_weights_ood, num_samples=2 * len(train_set_id), replacement=args.replacement)
-
         train_loader_ood = DataLoader(train_set_ood, batch_size=2*args.batch_size, sampler=weighted_train_sampler_ood, num_workers=args.prefetch, pin_memory=True)
-
+        
         train(train_loader_id, train_loader_ood, clf, optimizer, scheduler)
         val_metrics  = test(test_loader, clf)
         cla_acc = val_metrics['cla_acc']
@@ -216,20 +227,20 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', help='directory to store datasets', default='/data/cv')
     parser.add_argument('--id', type=str, default='cifar10')
     parser.add_argument('--ood', type=str, default='tiny_images')
+    parser.add_argument('--training', type=str, default='fix', choices=['fix', 'var'])
     parser.add_argument('--weight_type', type=str, default='prob', choices=['prob', 'logit'])
     parser.add_argument('--replacement', type=bool, default=True)
     parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='outputs')
     parser.add_argument('--arch', type=str, default='wrn40')
     parser.add_argument('--pretrain', type=str, default=None, help='path to pre-trained model')
-    parser.add_argument('--lr', type=float, default=0.1)
+    parser.add_argument('--lr', type=float, default=0.001)
     parser.add_argument('--weight_decay', type=float, default=0.0005)
     parser.add_argument('--momentum', type=float, default=0.9)
-    parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--batch_size_ood', type=int, default=3072)
-    parser.add_argument('--prefetch', type=int, default=0, help='number of dataloader workers')
+    parser.add_argument('--prefetch', type=int, default=16, help='number of dataloader workers')
     parser.add_argument('--gpu_idx', help='used gpu idx', type=int, default=0)
     args = parser.parse_args()
     
     main(args)
-

@@ -10,6 +10,7 @@ import numpy as np
 from pathlib import Path
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 from torch.utils.data import DataLoader
@@ -117,6 +118,7 @@ def main(args):
     num_classes = len(get_ds_info(args.dataset, 'classes'))
     print('>>> CLF {}'.format(args.arch))
     clf = get_clf(args.arch, num_classes)
+    clf = nn.DataParallel(clf)
 
     # move CLF to gpu device
     gpu_idx = int(args.gpu_idx)
@@ -176,14 +178,13 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', help='directory to store datasets', default='/data/cv')
     parser.add_argument('--dataset', type=str, default='cifar10')
     parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='outputs')
-    # parser.add_argument('--output_sub_dir', help='sub dir to store experiment artifacts', default='wrn40')
     parser.add_argument('--arch', type=str, default='wrn40')
     parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--weight_decay', type=float, default=0.0005)
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--prefetch', type=int, default=4, help='number of dataloader workers')
+    parser.add_argument('--prefetch', type=int, default=16, help='number of dataloader workers')
     parser.add_argument('--gpu_idx', help='used gpu idx', type=int, default=0)
     args = parser.parse_args()
     

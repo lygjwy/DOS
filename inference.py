@@ -41,8 +41,9 @@ def main(args):
     # load CLF
     num_classes = len(get_ds_info(args.id, 'classes'))
     clf = get_clf(args.arch, num_classes)
-    clf_path = Path(args.pretrain)
+    clf = nn.DataParallel(clf)
 
+    clf_path = Path(args.pretrain)
     if clf_path.is_file():
         clf_state = torch.load(str(clf_path))
         cla_acc = clf_state['cla_acc']
