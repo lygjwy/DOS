@@ -1,10 +1,11 @@
 '''
-Tuning or training with auxiliary OOD training data
+Tuning or training with auxiliary OOD training data by density resampling
 '''
 
 import copy
 import time
 import random
+import sklearn
 import argparse
 import numpy as np
 from pathlib import Path
@@ -24,32 +25,74 @@ def init_seeds(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-def get_resample_weights(data_loader, clf, weight_type):
-    '''
-    Calculating weights for resampling
-    '''
+def sample_estimator(data_loader, clf, num_classes):
+    clf.eval()
+    group_lasso = sklearn.covariance.EmpiricalCovariance(assume_centered=False)
+
+    num_sample_per_class = np.zeros(num_classes)
+    list_features = [0] * num_classes
+
+    for sample in data_loader:
+        data = sample['data'].cuda()
+        target = sample['label'].cuda()
+
+        _, penulti_feature = clf(data, ret_feat=True)
+        
+        # construct the sample matrix
+        for i in range(target.size(0)):
+            label = target[i]
+            if num_sample_per_class[label] == 0:
+                list_features[label] = penulti_feature[i].view(1, -1)
+            else:
+                list_features[label] = torch.cat((list_features[label], penulti_feature[i].view(1, -1)), 0)
+            num_sample_per_class[label] += 1
+
+    category_sample_mean = []
+    for j in range(num_classes):
+        category_sample_mean.append(torch.mean(list_features[j], 0))
+
+    X = 0
+    for j in range(num_classes):
+        if j == 0:
+            X = list_features[j] - category_sample_mean[j]
+        else:
+            X = torch.cat((X, list_features[j] - category_sample_mean[j]), 0)
+        
+    # find inverse
+    group_lasso.fit(X.cpu().numpy())
+    precision = group_lasso.precision_
+    
+    return category_sample_mean, torch.from_numpy(precision)
+
+# Resampling based on (class conditional) density 
+def get_resample_weights(data_loader, clf, num_classes, sample_mean, precision):
     clf.eval()
 
-    logit_maxs, prob_maxs = [], []
+    con_dens, con_idxs = [], []
+
     for sample in data_loader:
         data = sample['data'].cuda()
 
         with torch.no_grad():
-            logit = clf(data)
-            prob = torch.softmax(logit, dim=1)
+            _, penul_feat = clf(data, ret_feat=True)
 
-            logit_max, _ = torch.max(logit, dim=1)
-            logit_maxs.extend(F.softplus(logit_max).tolist())
+            # compute class conditional density
+            gaussian_score = 0
+            for j in range(num_classes):
+                category_sample_mean = sample_mean[j]
+                zero_f = penul_feat - category_sample_mean
+                term_gau = -0.5 * torch.mm(torch.mm(zero_f, precision), zero_f.t()).diag()
+                if j == 0:
+                    gaussian_score = term_gau.view(-1, 1)
+                else:
+                    gaussian_score = torch.cat((gaussian_score, term_gau.view(-1, 1)), 1)
 
-            prob_max, _ = torch.max(prob, dim=1)
-            prob_maxs.extend(prob_max.tolist())
-
-    if weight_type == 'logit':
-        return logit_maxs
-    elif weight_type == 'prob':
-        return prob_maxs
-    else:
-        raise RuntimeError('<<< Invalid weight type: {}'.format(weight_type))
+        # add to list   
+        dens, idxs = torch.max(gaussian_score, 1)
+        con_dens.extend(dens.tolist())
+        con_idxs.extend(idxs.tolist())
+    
+    return con_dens, con_idxs
 
 def cosine_annealing(step, total_steps, lr_max, lr_min):
     return lr_min + (lr_max - lr_min) * 0.5 * (1 + np.cos(step / total_steps * np.pi))
@@ -202,6 +245,7 @@ def main(args):
         
         data_loader_ood = DataLoader(train_set_ood, batch_size=args.batch_size_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
 
+        
         # resampling auxiliary OOD training samples by weights
         resample_weights_ood = get_resample_weights(data_loader_ood, clf, args.weight_type)
         weighted_train_sampler_ood = WeightedRandomSampler(resample_weights_ood, num_samples=2 * len(train_set_id), replacement=args.replacement)
