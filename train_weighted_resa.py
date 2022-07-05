@@ -13,7 +13,7 @@ import torch
 from torch import nn 
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
-from torch.utils.data import Subset, SubsetRandomSampler, WeightedRandomSampler, DataLoader
+from torch.utils.data import Subset, WeightedRandomSampler, DataLoader
 
 from models import get_clf
 from utils import setup_logger
@@ -120,10 +120,15 @@ def test(data_loader, net):
 def main(args):
     init_seeds(args.seed)
 
-    if args.replacement:
-        exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, 'tune', 'weighted', args.training, args.weight_type, 'wr'])
+    if args.pretrain is not None:
+        pretrain = 'tune'
     else:
-        exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, 'tune', 'weighted', args.training, args.weight_type, 'wor'])
+        pretrain = 'train'
+    
+    if args.replacement:
+        exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, pretrain, 'weighted', args.weight_type, args.training, 'wr'])
+    else:
+        exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, pretrain, 'weighted', args.weight_type, args.training, 'wor'])
 
     print('>>> Output dir: {}'.format(str(exp_path)))
     exp_path.mkdir(parents=True, exist_ok=True)
@@ -184,15 +189,15 @@ def main(args):
     all_set_ood = get_ds(root=args.data_dir, ds_name=args.ood, split='wo_cifar', transform=train_trf_ood)
 
     if args.training == 'fix':
-        # random select 2 ** 24
-        indices_ood = torch.randperm(len(all_set_ood))[:2 ** 24].tolist()
+        # random select 2 ** 24 --> 2 ** 20
+        indices_ood = torch.randperm(len(all_set_ood))[:2 ** 20].tolist()
         train_set_ood = Subset(all_set_ood, indices_ood)
     
 
     for epoch in range(start_epoch, args.epochs+1):
 
         if args.training == 'var':
-            indices_ood = torch.randperm(len(all_set_ood))[:2 ** 24].tolist()
+            indices_ood = torch.randperm(len(all_set_ood))[:2 ** 20].tolist()
             train_set_ood = Subset(all_set_ood, indices_ood)
         
         data_loader_ood = DataLoader(train_set_ood, batch_size=args.batch_size_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)

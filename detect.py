@@ -58,7 +58,7 @@ def main(args):
         clf_state = torch.load(str(clf_path))
         cla_acc = clf_state['cla_acc']
         clf.load_state_dict(clf_state['state_dict'])
-        print('>>> load classifier from {} (classifiication acc {:.4f}%)'.format(str(clf_path), cla_acc))
+        print('>>> load classifier from {} (classification acc {:.4f}%)'.format(str(clf_path), cla_acc))
     else:
         raise RuntimeError('<--- invlaid classifier path: {}'.format(str(clf_path)))
 

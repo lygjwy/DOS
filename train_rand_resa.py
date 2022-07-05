@@ -205,7 +205,7 @@ if __name__ == '__main__':
     parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='outputs')
     parser.add_argument('--arch', type=str, default='wrn40')
     parser.add_argument('--pretrain', type=str, default=None, help='path to pre-trained model')
-    parser.add_argument('--training', type=str, default='fix_loc', choices=['fix_loc', 'fix_rand', 'var_loc', 'var_rand'])
+    parser.add_argument('--training', type=str, default='loc_fix', choices=['loc_fix', 'rand_fix', 'loc_var', 'rand_var'])
     parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--weight_decay', type=float, default=0.0005)
     parser.add_argument('--momentum', type=float, default=0.9)
