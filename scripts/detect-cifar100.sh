@@ -1,4 +1,5 @@
 OODs="svhn lsunc dtd places365_10k cifar10 tinc lsunr tinr isun"
+
 # CIFAR-100
 # python detect.py --id cifar100 --oods $OODs --pretrain ./outputs/cifar100/wrn40/cla_best.pth --gpu_idx 0
 

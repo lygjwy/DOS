@@ -186,26 +186,29 @@ def main(args):
     cla_acc = 0.0
 
     train_trf_ood = get_ood_trf(args.id, args.ood, 'train')
-    all_set_ood = get_ds(root=args.data_dir, ds_name=args.ood, split='wo_cifar', transform=train_trf_ood)
+    test_trf_ood = get_ood_trf(args.id, args.ood, 'test')
+    train_all_set_ood = get_ds(root=args.data_dir, ds_name=args.ood, split='wo_cifar', transform=train_trf_ood)
+    train_all_set_ood_test = get_ds(root=args.data_dir, ds_name=args.ood, split='wo_cifar', transform=test_trf_ood)
 
     if args.training == 'fix':
         # random select 2 ** 24 --> 2 ** 20
-        indices_ood = torch.randperm(len(all_set_ood))[:2 ** 20].tolist()
-        train_set_ood = Subset(all_set_ood, indices_ood)
-    
+        indices_ood = torch.randperm(len(train_all_set_ood))[:2 ** 20].tolist()
+        train_candidate_set_ood = Subset(train_all_set_ood, indices_ood)
+        train_candidate_set_ood_test = Subset(train_all_set_ood_test, indices_ood)
 
     for epoch in range(start_epoch, args.epochs+1):
 
         if args.training == 'var':
-            indices_ood = torch.randperm(len(all_set_ood))[:2 ** 20].tolist()
-            train_set_ood = Subset(all_set_ood, indices_ood)
-        
-        data_loader_ood = DataLoader(train_set_ood, batch_size=args.batch_size_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
+            indices_ood = torch.randperm(len(train_all_set_ood))[:2 ** 20].tolist()
+            train_candidate_set_ood = Subset(train_all_set_ood, indices_ood)
+            train_candidate_set_ood_test = Subset(train_all_set_ood_test, indices_ood)
+
+        train_candidate_loader_ood_test = DataLoader(train_candidate_set_ood_test, batch_size=args.batch_size_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
 
         # resampling auxiliary OOD training samples by weights
-        resample_weights_ood = get_resample_weights(data_loader_ood, clf, args.weight_type)
+        resample_weights_ood = get_resample_weights(train_candidate_loader_ood_test, clf, args.weight_type)
         weighted_train_sampler_ood = WeightedRandomSampler(resample_weights_ood, num_samples=2 * len(train_set_id), replacement=args.replacement)
-        train_loader_ood = DataLoader(train_set_ood, batch_size=2*args.batch_size, sampler=weighted_train_sampler_ood, num_workers=args.prefetch, pin_memory=True)
+        train_loader_ood = DataLoader(train_candidate_set_ood, batch_size=2*args.batch_size, sampler=weighted_train_sampler_ood, num_workers=args.prefetch, pin_memory=True)
         
         train(train_loader_id, train_loader_ood, clf, optimizer, scheduler)
         val_metrics  = test(test_loader, clf)
@@ -234,7 +237,7 @@ if __name__ == '__main__':
     parser.add_argument('--ood', type=str, default='tiny_images')
     parser.add_argument('--training', type=str, default='fix', choices=['fix', 'var'])
     parser.add_argument('--weight_type', type=str, default='prob', choices=['prob', 'logit'])
-    parser.add_argument('--replacement', type=bool, default=True)
+    parser.add_argument('--replacement', action='store_true')
     parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='outputs')
     parser.add_argument('--arch', type=str, default='wrn40')
     parser.add_argument('--pretrain', type=str, default=None, help='path to pre-trained model')

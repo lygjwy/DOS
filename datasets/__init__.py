@@ -106,7 +106,8 @@ def get_ood_trf(ds_name_id, ds_name_ood, stage):
             'dtd': [transforms.Resize(32), transforms.CenterCrop(32), transforms.ToTensor(), transforms.Normalize(mean, std)],
             'isun': [transforms.ToTensor(), transforms.Normalize(mean, std)],
             'cifar10': [transforms.ToTensor(), transforms.Normalize(mean, std)],
-            'cifar100': [transforms.ToTensor(), transforms.Normalize(mean, std)]
+            'cifar100': [transforms.ToTensor(), transforms.Normalize(mean, std)],
+            'tiny_images': [transforms.ToTensor(), transforms.Normalize(mean, std)]
         }
     else:
         raise Exception('---> Dataset Stage: {} invalid'.format(stage))
