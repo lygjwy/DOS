@@ -69,7 +69,7 @@ def sample_estimator(data_loader, clf, num_classes):
 def get_resample_weights(data_loader, clf, num_classes, sample_mean, precision):
     clf.eval()
 
-    con_dens, con_idxs = [], []
+    dens, cats = [], []
 
     for sample in data_loader:
         data = sample['data'].cuda()
@@ -89,11 +89,11 @@ def get_resample_weights(data_loader, clf, num_classes, sample_mean, precision):
                     gaussian_score = torch.cat((gaussian_score, term_gau.view(-1, 1)), 1)
         
         # add to list   
-        dens, idxs = torch.max(gaussian_score, 1)
-        con_dens.extend(dens.tolist())
-        con_idxs.extend(idxs.tolist())
+        den, cat = torch.max(gaussian_score, dim=1)
+        dens.extend(den.tolist())
+        cats.extend(cat.tolist())
     
-    return con_dens, con_idxs
+    return dens, cats
 
 def cosine_annealing(step, total_steps, lr_max, lr_min):
     return lr_min + (lr_max - lr_min) * 0.5 * (1 + np.cos(step / total_steps * np.pi))
