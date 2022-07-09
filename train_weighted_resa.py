@@ -8,14 +8,13 @@ import random
 import argparse
 import numpy as np
 from pathlib import Path
-from functools import partial
 from sklearn.covariance import EmpiricalCovariance
 
 import torch
 from torch import nn 
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
-from torch.utils.data import Subset, WeightedRandomSampler, DataLoader
+from torch.utils.data import Subset, DataLoader
 
 from models import get_clf
 from utils import setup_logger
@@ -26,23 +25,7 @@ def init_seeds(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-def get_logit_cond_weight(data_loader, clf):
-    clf.eval()
-    weights, cats = [], []
-
-    for sample in data_loader:
-        data = sample['data'].cuda()
-
-        with torch.no_grad():
-            logit = clf(data)
-
-        logit_max, cat = torch.max(logit, dim=1)
-        weights.extend(logit_max.tolist())
-        cats.extend(cat.tolist())
-
-    return weights, cats
-
-def get_prob_cond_weight(data_loader, clf):
+def get_cond_conf_weight(data_loader, clf):
     clf.eval()
     weights, cats = [], []
 
@@ -57,7 +40,7 @@ def get_prob_cond_weight(data_loader, clf):
         weights.extend(prob_max.tolist())
         cats.extend(cat.tolist())
     
-    return weights, cats
+    return torch.tensor(weights), torch.tensor(cats)
 
 def sample_estimator(data_loader, clf, num_classes):
     clf.eval()
@@ -99,7 +82,7 @@ def sample_estimator(data_loader, clf, num_classes):
     
     return category_sample_mean, torch.from_numpy(precision).float().cuda()
 
-def get_den_cond_weight(data_loader, clf, num_classes, sample_mean, precision):
+def get_cond_dens_weight(data_loader, clf, num_classes, sample_mean, precision):
     clf.eval()
     weights, cats = [], []
 
@@ -125,7 +108,7 @@ def get_den_cond_weight(data_loader, clf, num_classes, sample_mean, precision):
         weights.extend(den_max.tolist())
         cats.extend(cat.tolist())
     
-    return weights, cats
+    return torch.tensor(weights), torch.tensor(cats)
 
 def cosine_annealing(step, total_steps, lr_max, lr_min):
     return lr_min + (lr_max - lr_min) * 0.5 * (1 + np.cos(step / total_steps * np.pi))
@@ -196,16 +179,12 @@ def test(data_loader, net):
 def main(args):
     init_seeds(args.seed)
 
-    if args.pretrain is not None:
-        pretrain = 'tune'
+    if args.cond_sample:
+        sampling = 'wc'
     else:
-        pretrain = 'train'
+        sampling = 'woc'
     
-    if args.replacement:
-        exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, pretrain, 'weighted', args.weight_type, args.training, 'wr'])
-    else:
-        exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, pretrain, 'weighted', args.weight_type, args.training, 'wor'])
-
+    exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, args.weight, sampling])
     print('>>> Output dir: {}'.format(str(exp_path)))
     exp_path.mkdir(parents=True, exist_ok=True)
 
@@ -229,17 +208,6 @@ def main(args):
     clf = get_clf(args.arch, num_classes)
     clf = nn.DataParallel(clf)
 
-    if args.pretrain is not None:
-        clf_path = Path(args.pretrain)
-
-        if clf_path.is_file():
-            clf_state = torch.load(str(clf_path))
-            cla_acc = clf_state['cla_acc']
-            clf.load_state_dict(clf_state['state_dict'])
-            print('>>> load CLF from {} (classifiication acc {:.4f}%)'.format(str(clf_path), cla_acc))
-        else:
-            raise RuntimeError('<<< invalid classifier path: {}'.format(str(clf_path)))
-    
     # move CLF to gpus
     gpu_idx = int(args.gpu_idx)
     if torch.cuda.is_available():
@@ -269,28 +237,19 @@ def main(args):
     train_all_set_ood_test = get_ds(root=args.data_dir, ds_name=args.ood, split='wo_cifar', transform=test_trf_ood)
 
     cond_weight_dic = {
-        'logit': get_logit_cond_weight,
-        'prob': get_prob_cond_weight,
-        'density': get_den_cond_weight
+        'conf': get_cond_conf_weight,
+        'dens': get_cond_dens_weight
     }
-    get_cond_weight = cond_weight_dic[args.cond_weight]
+    get_cond_weight = cond_weight_dic[args.weight]
     
-    if args.training == 'fix':
-        # random select 2 ** 24 --> 2 ** 20
-        indices_ood = torch.randperm(len(train_all_set_ood))[:2 ** 20].tolist()
-        train_candidate_set_ood = Subset(train_all_set_ood, indices_ood)
-        train_candidate_set_ood_test = Subset(train_all_set_ood_test, indices_ood)
-
     for epoch in range(start_epoch, args.epochs+1):
 
-        if args.training == 'var':
-            indices_ood = torch.randperm(len(train_all_set_ood))[:2 ** 20].tolist()
-            train_candidate_set_ood = Subset(train_all_set_ood, indices_ood)
-            train_candidate_set_ood_test = Subset(train_all_set_ood_test, indices_ood)
-
+        indices_candidate_ood = torch.randperm(len(train_all_set_ood))[:2 ** 20].tolist()
+        train_candidate_set_ood = Subset(train_all_set_ood, indices_candidate_ood)
+        train_candidate_set_ood_test = Subset(train_all_set_ood_test, indices_candidate_ood)
         train_candidate_loader_ood_test = DataLoader(train_candidate_set_ood_test, batch_size=args.batch_size_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
 
-        if args.cond_weight == 'density':
+        if args.weight == 'dens':
             cat_mean, precision = sample_estimator(train_loader_id_test, clf, num_classes)
             weights_ood, conds_ood = get_cond_weight(train_candidate_loader_ood_test, clf, num_classes, cat_mean, precision)
         else:
@@ -299,20 +258,31 @@ def main(args):
         if args.cond_sample:
             # conditional sampling
             indices_sampled_ood = []
+            cat_stat = {}
             for i in range(num_classes):
-                indices_cond_ood = (conds_ood == i).nonzero()
-                weights_cond_ood = weights_ood[indices_cond_ood]
+                indices_cond_ood = conds_ood.eq(i).nonzero()
+                cat_stat[i] = len(indices_cond_ood)
+                
+                if len(indices_cond_ood) < int(2 * len(train_set_id) / num_classes):
+                    indices_sampled_ood.extend(indices_cond_ood)
+                    indices_sup = torch.randperm(len(train_candidate_set_ood_test))[:int(2 * len(train_set_id) / num_classes) - len(indices_cond_ood)].tolist()
+                    indices_sampled_ood.extend(indices_sup)
+                else:
+                    # Tok-K sampling
+                    idx_to_index = indices_cond_ood.squeeze()
 
-                idx_to_index = indices_cond_ood.squeeze()
-                rand_idxs = torch.multinomial(weights_cond_ood, 2 * len(train_set_id) / num_classes, args.replacement, generator=None)
-                indices_sampled_ood.extend([idx_to_index[rand_idx] for rand_idx in rand_idxs.tolist()])
-
-            train_sampled_set_ood = Subset(train_candidate_set_ood, indices_sampled_ood)
-            train_loader_ood = DataLoader(train_sampled_set_ood, batch_size=2*args.batch_size, shuffle=True, num_workers=args.prefetch, pin_memory=True)
+                    weights_cond_ood = weights_ood[indices_cond_ood].squeeze()
+                    _, topk_idxs = torch.topk(weights_cond_ood, int(2 * len(train_set_id) / num_classes))
+                    indices_sampled_ood.extend([idx_to_index[topk_idx] for topk_idx in topk_idxs.tolist()])
+            if epoch == 20:
+                print(cat_stat)
         else:
             # non-conditional sampling
-            weighted_train_sampler_ood = WeightedRandomSampler(weights_ood, num_samples=2 * len(train_set_id), replacement=args.replacement)
-            train_loader_ood = DataLoader(train_candidate_set_ood, batch_size=2*args.batch_size, sampler=weighted_train_sampler_ood, num_workers=args.prefetch, pin_memory=True)
+            _, topk_idxs = torch.topk(weights_ood, 2 * len(train_set_id))
+            indices_sampled_ood = topk_idxs
+        
+        train_set_ood = Subset(train_candidate_set_ood, indices_sampled_ood)
+        train_loader_ood = DataLoader(train_set_ood, batch_size=2 * args.batch_size, shuffle=True, num_workers=args.prefetch, pin_memory=True)
         
         train(train_loader_id, train_loader_ood, clf, optimizer, scheduler)
         val_metrics  = test(test_loader, clf)
@@ -339,17 +309,14 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', help='directory to store datasets', default='/data/cv')
     parser.add_argument('--id', type=str, default='cifar10')
     parser.add_argument('--ood', type=str, default='tiny_images')
-    parser.add_argument('--training', type=str, default='fix', choices=['fix', 'var'])
-    parser.add_argument('--cond_weight', type=str, default='density', choices=['logit', 'prob', 'density'])
-    parser.add_argument('--cond_sample', type=str, action='store_true')
-    parser.add_argument('--replacement', action='store_true')
+    parser.add_argument('--weight', type=str, default='conf', choices=['conf', 'dens'])
+    parser.add_argument('--cond_sample', action='store_true')
     parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='outputs')
     parser.add_argument('--arch', type=str, default='wrn40')
-    parser.add_argument('--pretrain', type=str, default=None, help='path to pre-trained model')
-    parser.add_argument('--lr', type=float, default=0.001)
+    parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--weight_decay', type=float, default=0.0005)
     parser.add_argument('--momentum', type=float, default=0.9)
-    parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--batch_size_ood', type=int, default=3072)
     parser.add_argument('--prefetch', type=int, default=16, help='number of dataloader workers')
