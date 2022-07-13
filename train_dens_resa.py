@@ -113,7 +113,7 @@ def get_cond_dens_weight(data_loader, clf, num_classes, sample_mean, precision):
 def cosine_annealing(step, total_steps, lr_max, lr_min):
     return lr_min + (lr_max - lr_min) * 0.5 * (1 + np.cos(step / total_steps * np.pi))
 
-def train(data_loader_id, data_loader_ood, net, optimizer, scheduler):
+def train(data_loader_id, data_loader_ood, net, num_classes, optimizer, scheduler):
     net.train()
 
     total, correct = 0, 0
@@ -121,14 +121,16 @@ def train(data_loader_id, data_loader_ood, net, optimizer, scheduler):
 
     for sample_id, sample_ood in zip(data_loader_id, data_loader_ood):
         num_id = sample_id['data'].size(0)
+        num_ood = sample_ood['data'].size(0)
 
         data = torch.cat([sample_id['data'], sample_ood['data']], dim=0).cuda()
-        target = sample_id['label'].cuda()
+        target_id = sample_id['label'].cuda()
+        target_ood =  (torch.ones(num_ood) * num_classes).long().cuda()
 
         # forward
         logit = net(data)
-        loss = F.cross_entropy(logit[:num_id], target)
-        loss += 0.5 * -(logit[num_id:].mean(dim=1) - torch.logsumexp(logit[num_id:], dim=1)).mean()
+        loss = F.cross_entropy(logit[:num_id], target_id)
+        loss += 1.0 * F.cross_entropy(logit[num_id:], target_ood)
 
         # backward
         optimizer.zero_grad()
@@ -140,7 +142,7 @@ def train(data_loader_id, data_loader_ood, net, optimizer, scheduler):
         _, pred = logit[:num_id].max(dim=1)
         with torch.no_grad():
             total_loss += loss.item()
-            correct += pred.eq(target).sum().item()
+            correct += pred.eq(target_id).sum().item()
             total += num_id
 
     # average on sample
@@ -247,7 +249,7 @@ def main(args):
     get_cond_weight = cond_weight_dic[args.weight]
     
     # previously sampled ood indices, overall the whole set
-    indices_meta_ood = torch.randperm(len(train_all_set_ood))[:2 * len(train_set_id)].tolist()
+    # indices_sampled_ood = []
 
     for epoch in range(start_epoch, args.epochs+1):
 
@@ -255,24 +257,27 @@ def main(args):
         train_candidate_set_ood_test = Subset(train_all_set_ood_test, indices_candidate_ood)
         train_candidate_loader_ood_test = DataLoader(train_candidate_set_ood_test, batch_size=args.batch_size_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
 
-        train_meta_set_ood_test = Subset(train_all_set_ood_test, indices_meta_ood)
-        train_meta_loader_ood_test = DataLoader(train_meta_set_ood_test, batch_size=args.batch_size_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
+        # train_sampled_set_ood_test = Subset(train_all_set_ood_test, indices_sampled_ood)
+        # train_sampled_loader_ood_test = DataLoader(train_sampled_set_ood_test, batch_size=args.batch_size_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
 
         if args.weight == 'dens':
             cat_mean, precision = sample_estimator(train_loader_id_test, clf, num_classes)
             weights_candidate_ood, conds_candidate_ood = get_cond_weight(train_candidate_loader_ood_test, clf, num_classes, cat_mean, precision)
-            weights_meta_ood, conds_meta_ood = get_cond_weight(train_meta_loader_ood_test, clf, num_classes, cat_mean, precision)
+            # weights_sampled_ood, conds_sampled_ood = get_cond_weight(train_sampled_loader_ood_test, clf, num_classes, cat_mean, precision)
         else:
             weights_candidate_ood, conds_candidate_ood = get_cond_weight(train_candidate_loader_ood_test, clf)
-            weights_meta_ood, conds_meta_ood = get_cond_weight(train_meta_loader_ood_test, clf)
-        
+            # weights_sampled_ood, conds_sampled_ood = get_cond_weight(train_sampled_loader_ood_test, clf)
+ 
         # cumulative sample
-        if args.meta_sample:
-            weights_ood = torch.cat([weights_candidate_ood, weights_meta_ood], dim=0)
-            conds_ood = torch.cat([conds_candidate_ood, conds_meta_ood], dim=0)
-        else:
-            weights_ood = weights_candidate_ood
-            conds_ood = conds_candidate_ood
+        # if args.meta_sample:
+        #     weights_ood = torch.cat([weights_candidate_ood, weights_sampled_ood], dim=0)
+        #     conds_ood = torch.cat([conds_candidate_ood, conds_sampled_ood], dim=0)
+        # else:
+        #     weights_ood = weights_candidate_ood
+        #     conds_ood = conds_candidate_ood
+        
+        # if epoch > 1:
+        #     print('mean weights (after): ', torch.mean(weights_sampled_ood))
 
         # conditional sample
         if args.cond_sample:
@@ -280,33 +285,31 @@ def main(args):
             idxs_topk = []
             cat_stat = {}
             for i in range(num_classes):
-                idxs_cond_ood = conds_ood.eq(i).nonzero()
+                idxs_cond_ood = conds_candidate_ood.eq(i).nonzero()
                 cat_stat[i] = len(idxs_cond_ood)
                 
-                if len(idxs_cond_ood) < int(2 * len(train_set_id) / num_classes):
+                if len(idxs_cond_ood) < int(len(train_set_id) / num_classes):
                     idxs_topk.extend(idxs_cond_ood)
-                    idxs_sup = torch.randperm(len(weights_ood))[:int(2 * len(train_set_id) / num_classes) - len(idxs_cond_ood)].tolist()
+                    idxs_sup = torch.randperm(len(weights_candidate_ood))[:int(len(train_set_id) / num_classes) - len(idxs_cond_ood)].tolist()
                     idxs_topk.extend(idxs_sup)
                 else:
                     # Tok-K sampling
                     idxx_to_idx = idxs_cond_ood.squeeze()
-                    weights_cond_ood = weights_ood[idxs_cond_ood].squeeze()
+                    weights_cond_ood = weights_candidate_ood[idxs_cond_ood].squeeze()
 
-                    _, idxxs_topk = torch.topk(weights_cond_ood, int(2 * len(train_set_id) / num_classes))
+                    _, idxxs_topk = torch.topk(weights_cond_ood, int(len(train_set_id) / num_classes))
                     idxs_topk.extend([idxx_to_idx[idxx_topk] for idxx_topk in idxxs_topk.tolist()])
-            if epoch == 20:
+            if epoch % 20 == 0:
                 print(cat_stat)
+            # sort idxs_topk by weights[idxs_topk]
+            idxs_topk = [idx_topk for _, idx_topk in sorted(zip(weights_candidate_ood[idxs_topk], idxs_topk), reverse=True)]
         else:
             # non-conditional sampling
-            _, idxs_topk = torch.topk(weights_ood, 2 * len(train_set_id))
-        
-        # indices_sampled_ood = [indices_meta_ood[idx_topk] if idx_topk < len(indices_meta_ood) else indices_candidate_ood[idx_topk - len(indices_meta_ood)] for idx_topk in idxs_topk]
-        indices_sampled_ood = [indices_candidate_ood[idx_topk] if idx_topk < len(indices_candidate_ood) else indices_meta_ood[idx_topk - len(indices_candidate_ood)] for idx_topk in idxs_topk]
+            _, idxs_topk = torch.topk(weights_candidate_ood, len(train_set_id))
+
+        indices_sampled_ood = [indices_candidate_ood[idx_topk] for idx_topk in idxs_topk]
         train_set_ood = Subset(train_all_set_ood, indices_sampled_ood)
-        train_loader_ood = DataLoader(train_set_ood, batch_size=2 * args.batch_size, shuffle=True, num_workers=args.prefetch, pin_memory=True)
-        
-        indices_meta_ood = indices_sampled_ood
-        # print(len(indices_meta_ood))
+        train_loader_ood = DataLoader(train_set_ood, batch_size=args.batch_size, shuffle=True, num_workers=args.prefetch, pin_memory=True)
 
         train(train_loader_id, train_loader_ood, clf, optimizer, scheduler)
         val_metrics  = test(test_loader, clf)

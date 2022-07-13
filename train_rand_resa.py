@@ -143,10 +143,9 @@ def main(args):
     for epoch in range(start_epoch, args.epochs+1):
 
         # resampling auxiliary OOD training samples
-        indices_sampled_ood = torch.randperm(len(train_all_set_ood))[:2 * len(train_set_id)].tolist()
+        indices_sampled_ood = torch.randperm(len(train_all_set_ood))[:args.sampled_ood_size_factor * len(train_set_id)].tolist()
         train_set_ood = Subset(train_all_set_ood, indices_sampled_ood)
-        train_loader_ood = DataLoader(train_set_ood, batch_size=2 * args.batch_size, shuffle=True, num_workers=args.prefetch, pin_memory=True)
-        
+        train_loader_ood = DataLoader(train_set_ood, batch_size=args.sampled_ood_size_factor * args.batch_size, shuffle=True, num_workers=args.prefetch, pin_memory=True)
         train(train_loader_id, train_loader_ood, clf, optimizer, scheduler)
         val_metrics  = test(test_loader, clf)
         cla_acc = val_metrics['cla_acc']
@@ -172,13 +171,14 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', help='directory to store datasets', default='/data/cv')
     parser.add_argument('--id', type=str, default='cifar10')
     parser.add_argument('--ood', type=str, default='tiny_images')
-    parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='outputs')
+    parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='ckpts')
     parser.add_argument('--arch', type=str, default='wrn40')
     parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--weight_decay', type=float, default=0.0005)
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=128)
+    parser.add_argument('--sampled_ood_size_factor', type=int, default=2)
     parser.add_argument('--prefetch', type=int, default=16, help='number of dataloader workers')
     parser.add_argument('--gpu_idx', help='used gpu idx', type=int, default=0)
     args = parser.parse_args()
