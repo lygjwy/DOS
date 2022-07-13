@@ -25,23 +25,6 @@ def init_seeds(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-def get_cond_conf_weight(data_loader, clf):
-    clf.eval()
-    weights, cats = [], []
-
-    for sample in data_loader:
-        data = sample['data'].cuda()
-
-        with torch.no_grad():
-            logit = clf(data)
-        
-        prob = torch.softmax(logit, dim=1)
-        prob_max, cat = torch.max(prob, dim=1)
-        weights.extend(prob_max.tolist())
-        cats.extend(cat.tolist())
-    
-    return torch.tensor(weights), torch.tensor(cats)
-
 def sample_estimator(data_loader, clf, num_classes):
     clf.eval()
     group_lasso = EmpiricalCovariance(assume_centered=False)
@@ -75,7 +58,7 @@ def sample_estimator(data_loader, clf, num_classes):
             X = list_features[j] - category_sample_mean[j]
         else:
             X = torch.cat((X, list_features[j] - category_sample_mean[j]), 0)
-        
+
     # find inverse
     group_lasso.fit(X.cpu().numpy())
     precision = group_lasso.precision_
@@ -181,15 +164,7 @@ def test(data_loader, net):
 def main(args):
     init_seeds(args.seed)
 
-    if args.cond_sample:
-        sampling = 'wc'
-    else:
-        sampling = 'woc'
-    
-    if args.meta_sample:
-        exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, args.weight, sampling, 'wm'])
-    else:
-        exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, args.weight, sampling, 'wom'])
+    exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, 'dens', 'q_'+str(args.ood_quantile)])
     
     print('>>> Output dir: {}'.format(str(exp_path)))
     exp_path.mkdir(parents=True, exist_ok=True)
@@ -211,7 +186,7 @@ def main(args):
 
     num_classes = len(get_ds_info(args.id, 'classes'))
     print('>>> CLF: {}'.format(args.arch))
-    clf = get_clf(args.arch, num_classes)
+    clf = get_clf(args.arch, num_classes+1)
     clf = nn.DataParallel(clf)
 
     # move CLF to gpus
@@ -242,76 +217,25 @@ def main(args):
     train_all_set_ood = get_ds(root=args.data_dir, ds_name=args.ood, split='wo_cifar', transform=train_trf_ood)
     train_all_set_ood_test = get_ds(root=args.data_dir, ds_name=args.ood, split='wo_cifar', transform=test_trf_ood)
 
-    cond_weight_dic = {
-        'conf': get_cond_conf_weight,
-        'dens': get_cond_dens_weight
-    }
-    get_cond_weight = cond_weight_dic[args.weight]
-    
-    # previously sampled ood indices, overall the whole set
-    # indices_sampled_ood = []
-
     for epoch in range(start_epoch, args.epochs+1):
 
-        indices_candidate_ood = torch.randperm(len(train_all_set_ood))[:2 ** 20].tolist()
+        indices_candidate_ood = torch.randperm(len(train_all_set_ood))[:args.candidate_ood_size].tolist()
         train_candidate_set_ood_test = Subset(train_all_set_ood_test, indices_candidate_ood)
         train_candidate_loader_ood_test = DataLoader(train_candidate_set_ood_test, batch_size=args.batch_size_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
 
-        # train_sampled_set_ood_test = Subset(train_all_set_ood_test, indices_sampled_ood)
-        # train_sampled_loader_ood_test = DataLoader(train_sampled_set_ood_test, batch_size=args.batch_size_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
-
-        if args.weight == 'dens':
-            cat_mean, precision = sample_estimator(train_loader_id_test, clf, num_classes)
-            weights_candidate_ood, conds_candidate_ood = get_cond_weight(train_candidate_loader_ood_test, clf, num_classes, cat_mean, precision)
-            # weights_sampled_ood, conds_sampled_ood = get_cond_weight(train_sampled_loader_ood_test, clf, num_classes, cat_mean, precision)
-        else:
-            weights_candidate_ood, conds_candidate_ood = get_cond_weight(train_candidate_loader_ood_test, clf)
-            # weights_sampled_ood, conds_sampled_ood = get_cond_weight(train_sampled_loader_ood_test, clf)
- 
-        # cumulative sample
-        # if args.meta_sample:
-        #     weights_ood = torch.cat([weights_candidate_ood, weights_sampled_ood], dim=0)
-        #     conds_ood = torch.cat([conds_candidate_ood, conds_sampled_ood], dim=0)
-        # else:
-        #     weights_ood = weights_candidate_ood
-        #     conds_ood = conds_candidate_ood
+        cat_mean, precision = sample_estimator(train_loader_id_test, clf, num_classes)
+        weights_candidate_ood, conds_candidate_ood = get_cond_dens_weight(train_candidate_loader_ood_test, clf, num_classes, cat_mean, precision)
         
-        # if epoch > 1:
-        #     print('mean weights (after): ', torch.mean(weights_sampled_ood))
-
-        # conditional sample
-        if args.cond_sample:
-            # conditional sampling
-            idxs_topk = []
-            cat_stat = {}
-            for i in range(num_classes):
-                idxs_cond_ood = conds_candidate_ood.eq(i).nonzero()
-                cat_stat[i] = len(idxs_cond_ood)
-                
-                if len(idxs_cond_ood) < int(len(train_set_id) / num_classes):
-                    idxs_topk.extend(idxs_cond_ood)
-                    idxs_sup = torch.randperm(len(weights_candidate_ood))[:int(len(train_set_id) / num_classes) - len(idxs_cond_ood)].tolist()
-                    idxs_topk.extend(idxs_sup)
-                else:
-                    # Tok-K sampling
-                    idxx_to_idx = idxs_cond_ood.squeeze()
-                    weights_cond_ood = weights_candidate_ood[idxs_cond_ood].squeeze()
-
-                    _, idxxs_topk = torch.topk(weights_cond_ood, int(len(train_set_id) / num_classes))
-                    idxs_topk.extend([idxx_to_idx[idxx_topk] for idxx_topk in idxxs_topk.tolist()])
-            if epoch % 20 == 0:
-                print(cat_stat)
-            # sort idxs_topk by weights[idxs_topk]
-            idxs_topk = [idx_topk for _, idx_topk in sorted(zip(weights_candidate_ood[idxs_topk], idxs_topk), reverse=True)]
-        else:
-            # non-conditional sampling
-            _, idxs_topk = torch.topk(weights_candidate_ood, len(train_set_id))
-
-        indices_sampled_ood = [indices_candidate_ood[idx_topk] for idx_topk in idxs_topk]
+        # sort then quantile
+        idxs_sorted = np.argsort(-1.0 * weights_candidate_ood)
+        spt = int(args.candidate_ood_size * args.ood_quantile)
+        idxs_sampled = idxs_sorted[spt:spt + args.sampled_ood_size_factor * len(train_set_id)]
+        
+        indices_sampled_ood = [indices_candidate_ood[idx_sampled] for idx_sampled in idxs_sampled]
         train_set_ood = Subset(train_all_set_ood, indices_sampled_ood)
         train_loader_ood = DataLoader(train_set_ood, batch_size=args.batch_size, shuffle=True, num_workers=args.prefetch, pin_memory=True)
 
-        train(train_loader_id, train_loader_ood, clf, optimizer, scheduler)
+        train(train_loader_id, train_loader_ood, clf, num_classes, optimizer, scheduler)
         val_metrics  = test(test_loader, clf)
         cla_acc = val_metrics['cla_acc']
 
@@ -336,10 +260,8 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', help='directory to store datasets', default='/data/cv')
     parser.add_argument('--id', type=str, default='cifar10')
     parser.add_argument('--ood', type=str, default='tiny_images')
-    parser.add_argument('--weight', type=str, default='conf', choices=['conf', 'dens'])
-    parser.add_argument('--cond_sample', action='store_true')
-    parser.add_argument('--meta_sample', action='store_true')
-    parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='outputs')
+    parser.add_argument('--ood_quantile', type=float, default=0.125)
+    parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='ckpts')
     parser.add_argument('--arch', type=str, default='wrn40')
     parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--weight_decay', type=float, default=0.0005)
@@ -347,6 +269,8 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--batch_size_ood', type=int, default=3072)
+    parser.add_argument('--candidate_ood_size', type=int, default=2 ** 20)
+    parser.add_argument('--sampled_ood_size_factor', type=int, default=2)
     parser.add_argument('--prefetch', type=int, default=16, help='number of dataloader workers')
     parser.add_argument('--gpu_idx', help='used gpu idx', type=int, default=0)
     args = parser.parse_args()

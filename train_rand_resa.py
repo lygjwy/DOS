@@ -27,7 +27,7 @@ def init_seeds(seed):
 def cosine_annealing(step, total_steps, lr_max, lr_min):
     return lr_min + (lr_max - lr_min) * 0.5 * (1 + np.cos(step / total_steps * np.pi))
 
-def train(data_loader_id, data_loader_ood, net, optimizer, scheduler):
+def train(data_loader_id, data_loader_ood, net, num_classes, optimizer, scheduler):
     net.train()
 
     total, correct = 0, 0
@@ -35,14 +35,16 @@ def train(data_loader_id, data_loader_ood, net, optimizer, scheduler):
 
     for sample_id, sample_ood in zip(data_loader_id, data_loader_ood):
         num_id = sample_id['data'].size(0)
+        num_ood = sample_ood['data'].size(0)
 
         data = torch.cat([sample_id['data'], sample_ood['data']], dim=0).cuda()
-        target = sample_id['label'].cuda()
+        target_id = sample_id['label'].cuda()
+        target_ood =  (torch.ones(num_ood) * num_classes).long().cuda()
 
         # forward
         logit = net(data)
-        loss = F.cross_entropy(logit[:num_id], target)
-        loss += 0.5 * -(logit[num_id:].mean(dim=1) - torch.logsumexp(logit[num_id:], dim=1)).mean()
+        loss = F.cross_entropy(logit[:num_id], target_id)
+        loss += 1.0 * F.cross_entropy(logit[num_id:], target_ood)
 
         # backward
         optimizer.zero_grad()
@@ -54,7 +56,7 @@ def train(data_loader_id, data_loader_ood, net, optimizer, scheduler):
         _, pred = logit[:num_id].max(dim=1)
         with torch.no_grad():
             total_loss += loss.item()
-            correct += pred.eq(target).sum().item()
+            correct += pred.eq(target_id).sum().item()
             total += num_id
 
     # average on sample
@@ -93,7 +95,7 @@ def test(data_loader, net):
 def main(args):
     init_seeds(args.seed)
 
-    exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, 'random'])
+    exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, 'rand'])
     print('>>> Output dir: {}'.format(str(exp_path)))
     exp_path.mkdir(parents=True, exist_ok=True)
 
@@ -114,7 +116,7 @@ def main(args):
 
     num_classes = len(get_ds_info(args.id, 'classes'))
     print('>>> CLF: {}'.format(args.arch))
-    clf = get_clf(args.arch, num_classes)
+    clf = get_clf(args.arch, num_classes+1)
     clf = nn.DataParallel(clf)
 
     # move CLF to gpus
@@ -146,7 +148,7 @@ def main(args):
         indices_sampled_ood = torch.randperm(len(train_all_set_ood))[:args.sampled_ood_size_factor * len(train_set_id)].tolist()
         train_set_ood = Subset(train_all_set_ood, indices_sampled_ood)
         train_loader_ood = DataLoader(train_set_ood, batch_size=args.sampled_ood_size_factor * args.batch_size, shuffle=True, num_workers=args.prefetch, pin_memory=True)
-        train(train_loader_id, train_loader_ood, clf, optimizer, scheduler)
+        train(train_loader_id, train_loader_ood, clf, num_classes, optimizer, scheduler)
         val_metrics  = test(test_loader, clf)
         cla_acc = val_metrics['cla_acc']
 
