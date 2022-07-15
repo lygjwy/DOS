@@ -31,8 +31,45 @@ def get_msp_score(data_loader, clf):
 
     return msp_score
 
+def get_abs_score(data_loader, clf):
+    '''
+    Probability for absent class
+    '''
+    clf.eval()
+
+    abs_score = []
+    for sample in data_loader:
+        data = sample['data'].cuda()
+
+        with torch.no_grad():
+            logit = clf(data)
+
+            prob = torch.softmax(logit, dim=1)
+            abs_score.extend(prob[:, -1].tolist())
+
+    return [1 - abs for abs in abs_score]
+
+def get_acc(data_loader, clf, num_classes):
+    clf.eval()
+    correct, total = 0, 0
+
+    with torch.no_grad():
+        for sample in data_loader:
+            data = sample['data'].cuda()
+            target = sample['label'].cuda()
+
+            logit = clf(data)
+
+            _, pred = logit[:, :num_classes].max(dim=1)
+            correct += pred.eq(target).sum().item()
+            total += target.size(0)
+    
+    print(correct / total * 100.)
+    return correct / total * 100.
+
 score_dic = {
-    'msp': get_msp_score
+    'msp': get_msp_score,
+    'abs': get_abs_score
 }
 
 def main(args):
@@ -50,7 +87,10 @@ def main(args):
 
     # load CLF
     num_classes = len(get_ds_info(args.id, 'classes'))
-    clf = get_clf(args.arch, num_classes)
+    if args.score == 'abs':
+        clf = get_clf(args.arch, num_classes+1)
+    else:
+        clf = get_clf(args.arch, num_classes)
     clf = nn.DataParallel(clf)
     clf_path = Path(args.pretrain)
 
@@ -69,6 +109,8 @@ def main(args):
         clf.cuda()
         torch.cuda.manual_seed(args.seed)
     cudnn.benchmark = True
+
+    get_acc(test_loader_id, clf, num_classes)
 
     get_score = score_dic[args.score]
 
@@ -120,7 +162,7 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', type=str, default='/data/cv')
     parser.add_argument('--id', type=str, default='cifar10')
     parser.add_argument('--oods', nargs='+', default=['svhn', 'lsunc', 'dtd', 'places365_10k', 'cifar100', 'tinc', 'lsunr', 'tinr', 'isun'])
-    parser.add_argument('--score', type=str, default='msp')
+    parser.add_argument('--score', type=str, default='msp', choices=['msp', 'abs'])
     # parser.add_argument('--temperature', type=int, default=1000)
     # parser.add_argument('--magnitude', type=float, default=0.0014)
     parser.add_argument('--batch_size', type=int, default=200)

@@ -8,7 +8,6 @@ import random
 import argparse
 import numpy as np
 from pathlib import Path
-from sklearn.covariance import EmpiricalCovariance
 
 import torch
 from torch import nn 
@@ -17,6 +16,7 @@ import torch.backends.cudnn as cudnn
 from torch.utils.data import Subset, DataLoader
 
 from models import get_clf
+from trainers import get_trainer
 from utils import setup_logger
 from datasets import get_ds_info, get_ds_trf, get_ood_trf, get_ds
 
@@ -24,6 +24,8 @@ def init_seeds(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+# diff conf weight? Currently, sampling weights correspond to the loss function.
 
 def get_conf_weight(data_loader, clf):
     clf.eval()
@@ -41,49 +43,7 @@ def get_conf_weight(data_loader, clf):
     
     return torch.tensor(weights)
 
-def cosine_annealing(step, total_steps, lr_max, lr_min):
-    return lr_min + (lr_max - lr_min) * 0.5 * (1 + np.cos(step / total_steps * np.pi))
-
-def train(data_loader_id, data_loader_ood, net, num_classes, optimizer, scheduler):
-    net.train()
-
-    total, correct = 0, 0
-    total_loss = 0.0
-
-    for sample_id, sample_ood in zip(data_loader_id, data_loader_ood):
-        num_id = sample_id['data'].size(0)
-        num_ood = sample_ood['data'].size(0)
-
-        data = torch.cat([sample_id['data'], sample_ood['data']], dim=0).cuda()
-        target_id = sample_id['label'].cuda()
-        target_ood =  (torch.ones(num_ood) * num_classes).long().cuda()
-
-        # forward
-        logit = net(data)
-        loss = F.cross_entropy(logit[:num_id], target_id)
-        loss += 1.0 * F.cross_entropy(logit[num_id:], target_ood)
-
-        # backward
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        scheduler.step()
-
-        # evaluate
-        _, pred = logit[:num_id].max(dim=1)
-        with torch.no_grad():
-            total_loss += loss.item()
-            correct += pred.eq(target_id).sum().item()
-            total += num_id
-
-    # average on sample
-    print('[cla loss: {:.8f} | cla acc: {:.4f}%]'.format(total_loss / len(data_loader_id.dataset), 100. * correct / total))
-    return {
-        'cla_loss': total_loss / len(data_loader_id.dataset),
-        'cla_acc': 100. * correct / total
-    }
-
-def test(data_loader, net):
+def test(data_loader, net, num_classes):
     net.eval()
 
     total, correct = 0, 0
@@ -98,7 +58,7 @@ def test(data_loader, net):
             logit = net(data)
             total_loss += F.cross_entropy(logit, target).item()
 
-            _, pred = logit.max(dim=1)
+            _, pred = logit[:, :num_classes].max(dim=1)
             correct += pred.eq(target).sum().item()
             total += target.size(0)
 
@@ -112,7 +72,7 @@ def test(data_loader, net):
 def main(args):
     init_seeds(args.seed)
 
-    exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, 'conf', 'q_'+str(args.ood_quantile)])
+    exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, args.training, 'conf', 'q_'+str(args.ood_quantile)])
     
     print('>>> Output dir: {}'.format(str(exp_path)))
     exp_path.mkdir(parents=True, exist_ok=True)
@@ -132,8 +92,10 @@ def main(args):
 
     num_classes = len(get_ds_info(args.id, 'classes'))
     print('>>> CLF: {}'.format(args.arch))
-    # absentation class
-    clf = get_clf(args.arch, num_classes+1)
+    if args.training == 'uni':
+        clf = get_clf(args.arch, num_classes)
+    elif args.training == 'abs':
+        clf = get_clf(args.arch, num_classes+1)
     clf = nn.DataParallel(clf)
 
     # move CLF to gpus
@@ -144,16 +106,9 @@ def main(args):
         torch.cuda.manual_seed_all(args.seed)
     cudnn.benchmark = True
 
+    trainer = get_trainer(args.training)
     optimizer = torch.optim.SGD(clf.parameters(), lr=args.lr, weight_decay=args.weight_decay, momentum=args.momentum, nesterov=True)
-    scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer,
-        lr_lambda=lambda step: cosine_annealing(
-            step,
-            args.epochs * len(train_loader_id),
-            1,
-            1e-6 / args.lr
-        )
-    )
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [50, 75, 90], 0.1)
 
     begin_time = time.time()
     start_epoch = 1
@@ -165,11 +120,13 @@ def main(args):
     train_all_set_ood_test = get_ds(root=args.data_dir, ds_name=args.ood, split='wo_cifar', transform=test_trf_ood)
 
     for epoch in range(start_epoch, args.epochs+1):
+        
         indices_candidate_ood = torch.randperm(len(train_all_set_ood))[:args.candidate_ood_size].tolist()
         train_candidate_set_ood_test = Subset(train_all_set_ood_test, indices_candidate_ood)
         train_candidate_loader_ood_test = DataLoader(train_candidate_set_ood_test, batch_size=args.batch_size_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
 
         weights_candidate_ood = get_conf_weight(train_candidate_loader_ood_test, clf)
+        
         # sort then quantile
         idxs_sorted = np.argsort(weights_candidate_ood)
         spt = int(args.candidate_ood_size * args.ood_quantile)
@@ -179,8 +136,9 @@ def main(args):
         train_set_ood = Subset(train_all_set_ood, indices_sampled_ood)
         train_loader_ood = DataLoader(train_set_ood, batch_size=args.sampled_ood_size_factor * args.batch_size, shuffle=True, num_workers=args.prefetch, pin_memory=True)
 
-        train(train_loader_id, train_loader_ood, clf, num_classes, optimizer, scheduler)
-        val_metrics  = test(test_loader, clf)
+        trainer(train_loader_id, train_loader_ood, clf, optimizer)
+        scheduler.step()
+        val_metrics  = test(test_loader, clf, num_classes)
         cla_acc = val_metrics['cla_acc']
 
         print(
@@ -204,14 +162,15 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', help='directory to store datasets', default='/data/cv')
     parser.add_argument('--id', type=str, default='cifar10')
     parser.add_argument('--ood', type=str, default='tiny_images')
-    parser.add_argument('--ood_quantile', type=float, default=0.125)
+    parser.add_argument('--training', type=str, default='abs', choices=['abs'])
+    parser.add_argument('--ood_quantile', type=float, default=0.0)
     parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='ckpts')
     parser.add_argument('--arch', type=str, default='wrn40')
     parser.add_argument('--lr', type=float, default=0.1)
-    parser.add_argument('--weight_decay', type=float, default=0.0005)
+    parser.add_argument('--weight_decay', type=float, default=0.0001)
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--epochs', type=int, default=100)
-    parser.add_argument('--batch_size', type=int, default=128)
+    parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--batch_size_ood', type=int, default=3072)
     parser.add_argument('--candidate_ood_size', type=int, default=2 ** 20)
     parser.add_argument('--sampled_ood_size_factor', type=int, default=2)
