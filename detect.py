@@ -162,7 +162,7 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', type=str, default='/data/cv')
     parser.add_argument('--id', type=str, default='cifar10')
     parser.add_argument('--oods', nargs='+', default=['svhn', 'lsunc', 'dtd', 'places365_10k', 'cifar100', 'tinc', 'lsunr', 'tinr', 'isun'])
-    parser.add_argument('--score', type=str, default='msp', choices=['msp', 'abs'])
+    parser.add_argument('--score', type=str, default='abs', choices=['msp', 'abs'])
     # parser.add_argument('--temperature', type=int, default=1000)
     # parser.add_argument('--magnitude', type=float, default=0.0014)
     parser.add_argument('--batch_size', type=int, default=200)

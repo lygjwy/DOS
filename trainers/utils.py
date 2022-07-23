@@ -37,7 +37,7 @@ def train_uni(data_loader_id, data_loader_ood, net, optimizer):
         'cla_acc': 100. * correct / total
     }
 
-def train_abs(data_loader_id, data_loader_ood, net, optimizer):
+def train_abs(data_loader_id, data_loader_ood, net, optimizer, beta=1.0):
     num_classes = len(data_loader_id.dataset.classes)
     # print(num_classes)
     net.train()
@@ -56,7 +56,7 @@ def train_abs(data_loader_id, data_loader_ood, net, optimizer):
         # forward
         logit = net(data)
         loss = F.cross_entropy(logit[:num_id], target_id)
-        loss += 1.0 * F.cross_entropy(logit[num_id:], target_ood)
+        loss += beta * F.cross_entropy(logit[num_id:], target_ood)
 
         # backward
         optimizer.zero_grad()

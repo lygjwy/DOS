@@ -134,10 +134,11 @@ def main(args):
         train(train_loader, clf, optimizer)
         scheduler.step()
         val_metrics = test(test_loader, clf)
-        clf_best = val_metrics['cla_acc'] > best_acc
+        cla_acc = val_metrics['cla_acc']
+        clf_best = cla_acc > best_acc
         
         if clf_best:
-            best_acc = val_metrics['cla_acc']
+            best_acc = cla_acc
 
             cla_best_state = {
                 'epoch': epoch,

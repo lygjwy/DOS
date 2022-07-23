@@ -1,6 +1,5 @@
 '''
 Tuning or training with auxiliary OOD training data by classification resampling
-Replace OOD quantile with ID ratio
 '''
 
 import copy
@@ -69,7 +68,7 @@ def sample_estimator(data_loader, clf, num_classes):
 
 def get_cond_dens_weight(data_loader, clf, num_classes, sample_mean, precision):
     clf.eval()
-    weights, cats = [], []
+    weights = []
 
     for sample in data_loader:
         data = sample['data'].cuda()
@@ -78,30 +77,24 @@ def get_cond_dens_weight(data_loader, clf, num_classes, sample_mean, precision):
             _, penul_feat = clf(data, ret_feat=True)
 
         # compute class conditional density
-        # gaussian_score = 0
         maha_score = 0
         for j in range(num_classes):
             category_sample_mean = sample_mean[j]
             zero_f = penul_feat - category_sample_mean
-            # term_gau = torch.exp(-0.5 * torch.mm(torch.mm(zero_f, precision), zero_f.t()).diag())
-            # if j == 0:
-                # gaussian_score = term_gau.view(-1, 1)
-            # else:
-                # gaussian_score = torch.cat((gaussian_score, term_gau.view(-1, 1)), 1)
-
+            
             maha_dis = torch.mm(torch.mm(zero_f, precision), zero_f.t()).diag()
             if j == 0:
                 maha_score = maha_dis.view(-1, 1)
             else:
                 maha_score = torch.cat((maha_score, maha_dis.view(-1, 1)), dim=1)
-    
+            
         # add to list
-        maha_score = torch.sqrt(maha_score)
-        maha_min, cat = torch.min(maha_score, dim=1)
-        weights.extend(maha_min.tolist())
-        cats.extend(cat.tolist())
-
-    return torch.tensor(weights), torch.tensor(cats)
+        maha_score = torch.sqrt(maha_score) # shape [n * K]
+        weights.extend(maha_score.tolist())
+    
+    weights = np.asarray(weights)
+    # print(weights.shape)
+    return weights # shape [N * K]
 
 def test(data_loader, net, num_classes):
     net.eval()
@@ -132,7 +125,7 @@ def test(data_loader, net, num_classes):
 def main(args):
     init_seeds(args.seed)
 
-    exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, args.training, 'dens', 'r_'+str(args.id_ratio)])
+    exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, args.training, 'dens_cond', 'r_'+str(args.id_ratio)])
     
     print('>>> Output dir: {}'.format(str(exp_path)))
     exp_path.mkdir(parents=True, exist_ok=True)
@@ -188,22 +181,30 @@ def main(args):
         train_candidate_loader_ood_test = DataLoader(train_candidate_set_ood_test, batch_size=args.batch_size_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
 
         cat_mean, precision = sample_estimator(train_loader_id_test, clf, num_classes)
-        weights_candidate_ood, _ = get_cond_dens_weight(train_candidate_loader_ood_test, clf, num_classes, cat_mean, precision)
-        
+        weights_candidate_ood = get_cond_dens_weight(train_candidate_loader_ood_test, clf, num_classes, cat_mean, precision)
+
         # get the dividing point
-        weights_id, _ = get_cond_dens_weight(train_loader_id_test, clf, num_classes, cat_mean, precision)
-        floor = np.sort(weights_id)[max(0, int(args.id_ratio * len(train_set_id_test))-1)]
+        weights_id = get_cond_dens_weight(train_loader_id_test, clf, num_classes, cat_mean, precision)
+
+        idxs_sampled = []
+        sampled_cond_size = int(args.sampled_ood_size_factor * len(train_set_id_test) / num_classes)
+
+        # sort then quantile ascending by category
+        spt_dic = {}
+        for i in range(num_classes):
+            floor = np.sort(weights_id[:, i])[max(0, int(args.id_ratio * len(train_set_id_test))-1)]
+
+            weights_cond_candidate_ood_sorted = np.sort(weights_candidate_ood[:, i])
+            idxs_cond_sorted = np.argsort(weights_candidate_ood[:, i])
+            spt = np.searchsorted(weights_cond_candidate_ood_sorted, floor)
+
+            spt_dic[i] = round(100. * spt / len(weights_candidate_ood), 2)
+            spt = min(spt, len(weights_candidate_ood) - sampled_cond_size - 1)
+            idxs_sampled.extend(idxs_cond_sorted[spt:spt + sampled_cond_size])
         
-        # sort then quantile ascending
-        weights_candidate_ood_sorted = np.sort(weights_candidate_ood)
-        idxs_sorted = np.argsort(weights_candidate_ood)
-        spt = np.searchsorted(weights_candidate_ood_sorted, floor)
-        
-        print('Quantile: {:.2f}%'.format(100. * spt / len(weights_candidate_ood)))
-        spt = min(spt, len(weights_candidate_ood) - args.sampled_ood_size_factor * len(train_set_id) - 1)
-        # avoid less than necessary length
-        idxs_sampled = idxs_sorted[spt:spt + args.sampled_ood_size_factor * len(train_set_id)]
-        
+        # print the corrsponding quantile
+        print(spt_dic)
+
         indices_sampled_ood = [indices_candidate_ood[idx_sampled] for idx_sampled in idxs_sampled]
         train_set_ood = Subset(train_all_set_ood, indices_sampled_ood)
         train_loader_ood = DataLoader(train_set_ood, batch_size=args.sampled_ood_size_factor * args.batch_size, shuffle=True, num_workers=args.prefetch, pin_memory=True)
@@ -236,7 +237,7 @@ if __name__ == '__main__':
     parser.add_argument('--ood', type=str, default='tiny_images')
     parser.add_argument('--training', type=str, default='abs', choices=['abs'])
     parser.add_argument('--beta', type=float, default=1.0)
-    parser.add_argument('--id_ratio', type=float, default=0.8)
+    parser.add_argument('--id_ratio', type=float, default=0.95)
     parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='ckpts')
     parser.add_argument('--arch', type=str, default='wrn40')
     parser.add_argument('--lr', type=float, default=0.1)

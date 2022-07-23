@@ -1,6 +1,6 @@
 '''
 Tuning or training with auxiliary OOD training data by classification resampling
-Replace OOD quantile with ID ratio
+With OOD quantile
 '''
 
 import copy
@@ -132,7 +132,7 @@ def test(data_loader, net, num_classes):
 def main(args):
     init_seeds(args.seed)
 
-    exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, args.training, 'dens', 'r_'+str(args.id_ratio)])
+    exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, args.training, 'dens', 'b_'+str(args.beta), 'q_'+str(args.ood_quantile)])
     
     print('>>> Output dir: {}'.format(str(exp_path)))
     exp_path.mkdir(parents=True, exist_ok=True)
@@ -190,18 +190,9 @@ def main(args):
         cat_mean, precision = sample_estimator(train_loader_id_test, clf, num_classes)
         weights_candidate_ood, _ = get_cond_dens_weight(train_candidate_loader_ood_test, clf, num_classes, cat_mean, precision)
         
-        # get the dividing point
-        weights_id, _ = get_cond_dens_weight(train_loader_id_test, clf, num_classes, cat_mean, precision)
-        floor = np.sort(weights_id)[max(0, int(args.id_ratio * len(train_set_id_test))-1)]
-        
         # sort then quantile ascending
-        weights_candidate_ood_sorted = np.sort(weights_candidate_ood)
         idxs_sorted = np.argsort(weights_candidate_ood)
-        spt = np.searchsorted(weights_candidate_ood_sorted, floor)
-        
-        print('Quantile: {:.2f}%'.format(100. * spt / len(weights_candidate_ood)))
-        spt = min(spt, len(weights_candidate_ood) - args.sampled_ood_size_factor * len(train_set_id) - 1)
-        # avoid less than necessary length
+        spt = int(args.candidate_ood_size * args.ood_quantile)
         idxs_sampled = idxs_sorted[spt:spt + args.sampled_ood_size_factor * len(train_set_id)]
         
         indices_sampled_ood = [indices_candidate_ood[idx_sampled] for idx_sampled in idxs_sampled]
@@ -236,7 +227,7 @@ if __name__ == '__main__':
     parser.add_argument('--ood', type=str, default='tiny_images')
     parser.add_argument('--training', type=str, default='abs', choices=['abs'])
     parser.add_argument('--beta', type=float, default=1.0)
-    parser.add_argument('--id_ratio', type=float, default=0.8)
+    parser.add_argument('--ood_quantile', type=float, default=0.0)
     parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='ckpts')
     parser.add_argument('--arch', type=str, default='wrn40')
     parser.add_argument('--lr', type=float, default=0.1)
