@@ -11,6 +11,10 @@ import torch.nn.init as init
 import torch.nn.functional as F
 from torch.autograd import Variable
 
+def norm(x):
+    norm = torch.norm(x, p=2, dim=1)
+    x = x / (norm.expand(1, -1).t() + .0001)
+    return x
 
 def conv3x3(in_planes, out_planes, stride=1):
     return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=True)
@@ -47,8 +51,9 @@ class wide_basic(nn.Module):
         return out
 
 class Wide_ResNet(nn.Module):
-    def __init__(self, depth, widen_factor, dropout_rate, num_classes, in_size=32):
+    def __init__(self, depth, widen_factor, dropout_rate, num_classes, in_size=32, clf_type='inner'):
         super(Wide_ResNet, self).__init__()
+        self.clf_type = clf_type # ['inner', 'euclidean', 'cosine']
         self.in_planes = 16
 
         assert ((depth-4)%6 == 0), 'Wide ResNet depth should be 6n+4'
@@ -63,7 +68,15 @@ class Wide_ResNet(nn.Module):
         self.layer2 = self._wide_layer(wide_basic, nStages[2], n, dropout_rate, stride=2)
         self.layer3 = self._wide_layer(wide_basic, nStages[3], n, dropout_rate, stride=2)
         self.bn1 = nn.BatchNorm2d(nStages[3], momentum=0.9)
-        self.linear = nn.Linear(nStages[3], num_classes)
+        if self.clf_type == 'inner':
+            self.linear = nn.Linear(nStages[3], num_classes)
+            nn.init.kaiming_normal_(self.linear.weight.data, nonlinearity='relu')
+            self.linear.bias.data = torch.zeros(size=self.linear.bias.size())
+        elif self.clf_type == 'euclidean':
+            self.linear = nn.Linear(nStages[3], num_classes, bias=False)
+            nn.init.kaiming_normal_(self.linear.weight.data, nonlinearity='relu')
+        else:
+            raise RuntimeError('<<< Invalid CLF TYPE: {}'.format(self.clf_type))
         self.feature_dim = self.linear.in_features
 
         self.pool_size = in_size // 4
@@ -86,9 +99,23 @@ class Wide_ResNet(nn.Module):
         out = F.relu(self.bn1(out))
         out = F.avg_pool2d(out, self.pool_size)
         out = out.view(out.size(0), -1)
+        if self.clf_type == 'inner':
+            logit = self.linear(out)
+        elif self.clf_type == 'euclidean':
+            out_ = out.unsqueeze(2) # [BATCH, FEAT_DIM, 1]
+            w = self.linear.weight.T.unsqueeze(0) # [1, FEAT_DIM, NUM_CLA]
+            # print(torch.norm(out, dim=1))
+            # print(self.linear.weight.shape) # [NUM_CLA, FEAT_DIM]
+            # print(torch.norm(self.linear.weight, dim=1))
+            # print(torch.max(torch.matmul(norm(out), norm(self.linear.weight).T), dim=1)[0]) # [BATCH, NUM_CLA]
+            # exit()
+            logit = -((out_ - w).pow(2)).mean(1)
+        else:
+            raise RuntimeError('<<< Invalid CLF TYPE: {}'.format(self.clf_type))
+        
         if ret_feat:
-            return self.linear(out), out
-        return self.linear(out)
+            return logit, out
+        return logit
 
 if __name__ == '__main__':
     net = Wide_ResNet(28, 10, 0.3, 10)

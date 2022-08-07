@@ -3,13 +3,11 @@ Tuning or training with auxiliary OOD training data by random resampling
 '''
 
 import copy
-from tabnanny import verbose
 import time
 import random
 import argparse
 import numpy as np
 from pathlib import Path
-from functools import partial
 
 import torch
 from torch import nn 
@@ -47,16 +45,17 @@ def test(data_loader, net, num_classes):
             total += target.size(0)
 
     # average on sample
-    print('[cla loss: {:.8f} | cla acc: {:.4f}%]'.format(total_loss / len(data_loader.dataset), 100. * correct / total))
+    print('[cla loss: {:.8f} | cla acc: {:.4f}%]'.format(total_loss / len(data_loader), 100. * correct / total))
     return {
-        'cla_loss': total_loss / len(data_loader.dataset),
+        'cla_loss': total_loss / len(data_loader),
         'cla_acc': 100. * correct / total
     }
 
 def main(args):
     init_seeds(args.seed)
 
-    exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, args.training, 'rand'])
+    exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, args.clf_type, args.training, 'rand', 'b_'+str(args.beta)])
+    
     print('>>> Output dir: {}'.format(str(exp_path)))
     exp_path.mkdir(parents=True, exist_ok=True)
 
@@ -77,9 +76,11 @@ def main(args):
     num_classes = len(get_ds_info(args.id, 'classes'))
     print('>>> CLF: {}'.format(args.arch))
     if args.training == 'uni':
-        clf = get_clf(args.arch, num_classes)
+        # clf = get_clf(args.arch, num_classes)
+        clf = get_clf(args.arch, num_classes, args.clf_type)
     elif args.training == 'abs':
-        clf = get_clf(args.arch, num_classes+1)
+        # clf = get_clf(args.arch, num_classes+1)
+        clf = get_clf(args.arch, num_classes+1, args.clf_type)
     clf = nn.DataParallel(clf)
 
     # move CLF to gpus
@@ -90,10 +91,24 @@ def main(args):
         torch.cuda.manual_seed_all(args.seed)
     cudnn.benchmark = True
 
+    # training parameters
+    parameters, linear_parameters = [], []
+    for name, parameter in clf.named_parameters():
+        if name == 'module.linear.weight' or name == 'module.linear.bias':
+            linear_parameters.append(parameter)
+        else:
+            parameters.append(parameter)
+    
     # get trainer
     trainer = get_trainer(args.training)
-    optimizer = torch.optim.SGD(clf.parameters(), lr=args.lr, weight_decay=args.weight_decay, momentum=args.momentum, nesterov=True)
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [50, 75, 90], 0.1)
+    # optimizer = torch.optim.SGD(clf.parameters(), lr=args.lr, weight_decay=args.weight_decay, momentum=args.momentum, nesterov=True)
+    # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [50, 75, 90], 0.1)
+    optimizer = torch.optim.SGD(parameters, lr=args.lr, weight_decay=args.weight_decay, momentum=args.momentum)
+    # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones = [int(args.epochs * 0.5), int(args.epochs * 0.75), int(args.epochs * 0.9)], gamma=0.1)
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[int(args.epochs * 0.5), int(args.epochs * 0.75)], gamma=0.1)
+    linear_optimizer = torch.optim.SGD(linear_parameters, lr=args.lr, weight_decay=args.linear_weight_decay, momentum=args.momentum) # no weight_decay
+    # linear_scheduler = torch.optim.lr_scheduler.MultiStepLR(linear_optimizer, milestones = [int(args.epochs * 0.5), int(args.epochs * 0.75), int(args.epochs * 0.9)], gamma=0.1)
+    linear_scheduler = torch.optim.lr_scheduler.MultiStepLR(linear_optimizer, milestones=[int(args.epochs * 0.5), int(args.epochs * 0.75)], gamma=0.1)
 
     begin_time = time.time()
     start_epoch = 1
@@ -106,8 +121,9 @@ def main(args):
         train_set_ood = Subset(train_all_set_ood, indices_sampled_ood)
         train_loader_ood = DataLoader(train_set_ood, batch_size=args.sampled_ood_size_factor * args.batch_size, shuffle=True, num_workers=args.prefetch, pin_memory=True)
         
-        trainer(train_loader_id, train_loader_ood, clf, optimizer)
+        trainer(train_loader_id, train_loader_ood, clf, optimizer, linear_optimizer)
         scheduler.step()
+        linear_scheduler.step()
         val_metrics  = test(test_loader, clf, num_classes)
         cla_acc = val_metrics['cla_acc']
 
@@ -132,11 +148,14 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', help='directory to store datasets', default='/data/cv')
     parser.add_argument('--id', type=str, default='cifar10')
     parser.add_argument('--ood', type=str, default='tiny_images')
-    parser.add_argument('--training', type=str, default='abs', choices=['uni', 'abs'])
-    parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='ckpts')
+    parser.add_argument('--training', type=str, default='uni', choices=['uni', 'abs'])
+    parser.add_argument('--beta', type=float, default=0.5)
+    parser.add_argument('--clf_type', type=str, default='inner', choices=['euclidean', 'inner'])
+    parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='outputs')
     parser.add_argument('--arch', type=str, default='wrn40')
     parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--weight_decay', type=float, default=0.0001)
+    parser.add_argument('--linear_weight_decay', type=float, default=0.0001)
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=64)

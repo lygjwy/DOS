@@ -5,6 +5,8 @@ Detect OOD samples with CLF
 import argparse
 import numpy as np
 from pathlib import Path
+from functools import partial
+from sklearn.covariance import EmpiricalCovariance
 # import sklearn.covariance
 
 import torch
@@ -49,6 +51,101 @@ def get_abs_score(data_loader, clf):
 
     return [1 - abs for abs in abs_score]
 
+def get_logit_score(data_loader, clf):
+    clf.eval()
+
+    logit_score = []
+    for sample in data_loader:
+        data = sample['data'].cuda()
+
+        with torch.no_grad():
+            logit = clf(data)
+            logit_score.extend(torch.max(logit, dim=1)[0].tolist())
+
+    return logit_score
+
+def sample_estimator(data_loader, clf, num_classes):
+    clf.eval()
+    group_lasso = EmpiricalCovariance(assume_centered=False)
+
+    num_sample_per_class = np.zeros(num_classes)
+    list_features = [0] * num_classes
+
+    for sample in data_loader:
+        data = sample['data'].cuda()
+        target = sample['label'].cuda()
+
+        with torch.no_grad():
+            _, penulti_feature = clf(data, ret_feat=True)
+
+        # construct the sample matrix
+        for i in range(target.size(0)):
+            label = target[i]
+            if num_sample_per_class[label] == 0:
+                list_features[label] = penulti_feature[i].view(1, -1)
+            else:
+                list_features[label] = torch.cat((list_features[label], penulti_feature[i].view(1, -1)), 0)
+            num_sample_per_class[label] += 1
+
+    category_sample_mean = []
+    for j in range(num_classes):
+        category_sample_mean.append(torch.mean(list_features[j], 0))
+
+    X = 0
+    for j in range(num_classes):
+        if j == 0:
+            X = list_features[j] - category_sample_mean[j]
+        else:
+            X = torch.cat((X, list_features[j] - category_sample_mean[j]), 0)
+        
+        # find inverse
+    group_lasso.fit(X.cpu().numpy())
+    precision = group_lasso.precision_
+    
+    return category_sample_mean, torch.from_numpy(precision).float().cuda()
+
+def get_mahalanobis_score(data_loader, clf, num_classes, sample_mean, precision):
+    '''
+    Negative mahalanobis distance to the cloest class center
+    '''
+    clf.eval()
+
+    nm_score = []
+    for sample in data_loader:
+        data = sample['data'].cuda()
+
+        with torch.no_grad():
+            _, penul_feat = clf(data, ret_feat=True)
+
+        term_gaus = torch.empty(0)
+        for j in range(num_classes):
+            category_sample_mean = sample_mean[j]
+            zero_f = penul_feat - category_sample_mean
+            # term_gau = torch.exp(-0.5 * torch.mm(torch.mm(zero_f, precision), zero_f.t()).diag()) # [BATCH,]
+            term_gau = -0.5 * torch.mm(torch.mm(zero_f, precision), zero_f.t()).diag() # [BATCH, ]
+            if j == 0:
+                term_gaus = term_gau.view(-1, 1)
+            else:
+                term_gaus = torch.cat((term_gaus, term_gau.view(-1, 1)), dim=1)
+
+        nm_score.extend(torch.max(term_gaus, dim=1)[0].tolist())
+
+    return nm_score
+
+def get_energy_score(data_loader, clf, temperature=1.0):
+    clf.eval()
+    
+    energy_score = []
+
+    for sample in data_loader:
+        data = sample['data'].cuda()
+        
+        with torch.no_grad():
+            logit = clf(data)
+            energy_score.extend((temperature * torch.logsumexp(logit / temperature, dim=1)).tolist())
+    
+    return energy_score
+
 def get_acc(data_loader, clf, num_classes):
     clf.eval()
     correct, total = 0, 0
@@ -69,7 +166,10 @@ def get_acc(data_loader, clf, num_classes):
 
 score_dic = {
     'msp': get_msp_score,
-    'abs': get_abs_score
+    'abs': get_abs_score,
+    'logit': get_logit_score,
+    'maha': get_mahalanobis_score,
+    'energy': get_energy_score
 }
 
 def main(args):
@@ -88,9 +188,12 @@ def main(args):
     # load CLF
     num_classes = len(get_ds_info(args.id, 'classes'))
     if args.score == 'abs':
-        clf = get_clf(args.arch, num_classes+1)
+        clf = get_clf(args.arch, num_classes+1, args.clf_type)
+    elif args.score in ['maha', 'logit', 'energy', 'msp']:
+        clf = get_clf(args.arch, num_classes, args.clf_type)
     else:
-        clf = get_clf(args.arch, num_classes)
+        raise RuntimeError('<<< Invalid score: '.format(args.score))
+    
     clf = nn.DataParallel(clf)
     clf_path = Path(args.pretrain)
 
@@ -110,10 +213,21 @@ def main(args):
         torch.cuda.manual_seed(args.seed)
     cudnn.benchmark = True
 
-    get_acc(test_loader_id, clf, num_classes)
+    # get_acc(test_loader_id, clf, num_classes)
 
     get_score = score_dic[args.score]
-
+    if args.score == 'maha':
+        train_set_id_test = get_ds(root=args.data_dir, ds_name=args.id, split='test', transform=test_trf_id)
+        train_loader_id_test = DataLoader(train_set_id_test, batch_size=args.batch_size, shuffle=False, num_workers=args.prefetch, pin_memory=True)
+        cat_mean, precision = sample_estimator(train_loader_id_test, clf, num_classes)
+        get_score = partial(
+            score_dic['maha'],
+            num_classes=num_classes, 
+            sample_mean=cat_mean, 
+            precision=precision
+        )
+    else:
+        get_score = score_dic[args.score]
     score_id = get_score(test_loader_id, clf)
     label_id = np.ones(len(score_id))
 
@@ -162,12 +276,13 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', type=str, default='/data/cv')
     parser.add_argument('--id', type=str, default='cifar10')
     parser.add_argument('--oods', nargs='+', default=['svhn', 'lsunc', 'dtd', 'places365_10k', 'cifar100', 'tinc', 'lsunr', 'tinr', 'isun'])
-    parser.add_argument('--score', type=str, default='abs', choices=['msp', 'abs'])
+    parser.add_argument('--score', type=str, default='abs', choices=['msp', 'abs', 'logit', 'maha', 'energy'])
     # parser.add_argument('--temperature', type=int, default=1000)
     # parser.add_argument('--magnitude', type=float, default=0.0014)
     parser.add_argument('--batch_size', type=int, default=200)
     parser.add_argument('--prefetch', type=int, default=16)
     parser.add_argument('--arch', type=str, default='wrn40')
+    parser.add_argument('--clf_type', type=str, default='inner', choices=['inner', 'euclidean'])
     parser.add_argument('--pretrain', type=str, default=None, help='path to pre-trained model')
     parser.add_argument('--gpu_idx', type=int, default=0)
 

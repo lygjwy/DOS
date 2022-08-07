@@ -66,9 +66,9 @@ def sample_estimator(data_loader, clf, num_classes):
     
     return category_sample_mean, torch.from_numpy(precision).float().cuda()
 
-def get_cond_dens_weight(data_loader, clf, num_classes, sample_mean, precision):
+def get_cond_maha_weight(data_loader, clf, num_classes, sample_mean, precision):
     clf.eval()
-    weights = []
+    min_mahas, full_mahas = [], []
 
     for sample in data_loader:
         data = sample['data'].cuda()
@@ -77,6 +77,7 @@ def get_cond_dens_weight(data_loader, clf, num_classes, sample_mean, precision):
             _, penul_feat = clf(data, ret_feat=True)
 
         # compute class conditional density
+        # gaussian_score = 0
         maha_score = 0
         for j in range(num_classes):
             category_sample_mean = sample_mean[j]
@@ -87,14 +88,29 @@ def get_cond_dens_weight(data_loader, clf, num_classes, sample_mean, precision):
                 maha_score = maha_dis.view(-1, 1)
             else:
                 maha_score = torch.cat((maha_score, maha_dis.view(-1, 1)), dim=1)
-            
-        # add to list
-        maha_score = torch.sqrt(maha_score) # shape [n * K]
-        weights.extend(maha_score.tolist())
     
-    weights = np.asarray(weights)
-    # print(weights.shape)
-    return weights # shape [N * K]
+        # add to list
+        maha_score = torch.sqrt(maha_score)
+        full_mahas.extend(maha_score.tolist())
+        maha_min = torch.min(maha_score, dim=1)[0]
+        min_mahas.extend(maha_min.tolist())
+
+    return torch.tensor(min_mahas), torch.tensor(full_mahas)
+
+def get_cond_negative_logit_weight(data_loader, clf):
+    clf.eval()
+    max_logits, full_logits = [], []
+
+    for sample in data_loader:
+        data = sample['data'].cuda()
+
+        with torch.no_grad():
+            logit = clf(data)
+            full_logits.extend(logit.tolist())
+            max_logit = torch.max(logit, dim=1)[0]
+            max_logits.extend(max_logit.tolist())
+    
+    return -1.0 * torch.tensor(max_logits), -1.0 * torch.tensor(full_logits)
 
 def test(data_loader, net, num_classes):
     net.eval()
@@ -116,16 +132,16 @@ def test(data_loader, net, num_classes):
             total += target.size(0)
 
     # average on sample
-    print('[cla loss: {:.8f} | cla acc: {:.4f}%]'.format(total_loss / len(data_loader.dataset), 100. * correct / total))
+    print('[cla loss: {:.8f} | cla acc: {:.4f}%]'.format(total_loss / len(data_loader), 100. * correct / total))
     return {
-        'cla_loss': total_loss / len(data_loader.dataset),
+        'cla_loss': total_loss / len(data_loader),
         'cla_acc': 100. * correct / total
     }
 
 def main(args):
     init_seeds(args.seed)
 
-    exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, args.training, 'dens_cond', 'r_'+str(args.id_ratio)])
+    exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, args.clf_type, args.training, args.dist+'_cond', 'q_'+str(args.ood_quantile)])
     
     print('>>> Output dir: {}'.format(str(exp_path)))
     exp_path.mkdir(parents=True, exist_ok=True)
@@ -148,9 +164,9 @@ def main(args):
     num_classes = len(get_ds_info(args.id, 'classes'))
     print('>>> CLF: {}'.format(args.arch))
     if args.training == 'uni':
-        clf = get_clf(args.arch, num_classes)
+        clf = get_clf(args.arch, num_classes, args.clf_type)
     elif args.training == 'abs':
-        clf = get_clf(args.arch, num_classes+1)
+        clf = get_clf(args.arch, num_classes+1, args.clf_type)
     clf = nn.DataParallel(clf)
 
     # move CLF to gpus
@@ -161,9 +177,24 @@ def main(args):
         torch.cuda.manual_seed_all(args.seed)
     cudnn.benchmark = True
 
+    # training parameters
+    parameters, linear_parameters = [], []
+    for name, parameter in clf.named_parameters():
+        if name == 'module.linear.weight' or name == 'module.linear.bias':
+            linear_parameters.append(parameter)
+        else:
+            parameters.append(parameter)
+    
     trainer = get_trainer(args.training)
-    optimizer = torch.optim.SGD(clf.parameters(), lr=args.lr, weight_decay=args.weight_decay, momentum=args.momentum, nesterov=True)
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [50, 75, 90], 0.1)
+    optimizer = torch.optim.SGD(parameters, lr=args.lr, weight_decay=args.weight_decay, momentum=args.momentum)
+    linear_optimizer = torch.optim.SGD(linear_parameters, lr=args.lr, weight_decay=args.linear_weight_decay, momentum=args.momentum) # no weight_decay
+    
+    if args.id == 'cifar100' and args.clf_type =='euclidean':
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones = [int(args.epochs * 0.5), int(args.epochs * 0.9)], gamma=0.1)
+        linear_scheduler = torch.optim.lr_scheduler.MultiStepLR(linear_optimizer, milestones = [int(args.epochs * 0.5), int(args.epochs * 0.9)], gamma=0.1)
+    else:
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones = [int(args.epochs * 0.5), int(args.epochs * 0.75)], gamma=0.1)
+        linear_scheduler = torch.optim.lr_scheduler.MultiStepLR(linear_optimizer, milestones = [int(args.epochs * 0.5), int(args.epochs * 0.75)], gamma=0.1)
 
     begin_time = time.time()
     start_epoch = 1
@@ -180,37 +211,33 @@ def main(args):
         train_candidate_set_ood_test = Subset(train_all_set_ood_test, indices_candidate_ood)
         train_candidate_loader_ood_test = DataLoader(train_candidate_set_ood_test, batch_size=args.batch_size_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
 
-        cat_mean, precision = sample_estimator(train_loader_id_test, clf, num_classes)
-        weights_candidate_ood = get_cond_dens_weight(train_candidate_loader_ood_test, clf, num_classes, cat_mean, precision)
-
-        # get the dividing point
-        weights_id = get_cond_dens_weight(train_loader_id_test, clf, num_classes, cat_mean, precision)
-
+        if args.dist == 'maha':
+            cat_mean, precision = sample_estimator(train_loader_id_test, clf, num_classes)
+            _, weights_candidate_ood = get_cond_maha_weight(train_candidate_loader_ood_test, clf, num_classes, cat_mean, precision)
+        elif args.dist == 'negative_logit':
+            _, weights_candidate_ood = get_cond_negative_logit_weight(train_candidate_loader_ood_test, clf)
+        else:
+            raise RuntimeError('<<< invalid distance weights {}'.format(args.dist))
+        
         idxs_sampled = []
         sampled_cond_size = int(args.sampled_ood_size_factor * len(train_set_id_test) / num_classes)
 
         # sort then quantile ascending by category
-        spt_dic = {}
         for i in range(num_classes):
-            floor = np.sort(weights_id[:, i])[max(0, int(args.id_ratio * len(train_set_id_test))-1)]
-
-            weights_cond_candidate_ood_sorted = np.sort(weights_candidate_ood[:, i])
             idxs_cond_sorted = np.argsort(weights_candidate_ood[:, i])
-            spt = np.searchsorted(weights_cond_candidate_ood_sorted, floor)
-
-            spt_dic[i] = round(100. * spt / len(weights_candidate_ood), 2)
-            spt = min(spt, len(weights_candidate_ood) - sampled_cond_size - 1)
+            spt = int(args.candidate_ood_size * args.ood_quantile)
             idxs_sampled.extend(idxs_cond_sorted[spt:spt + sampled_cond_size])
         
-        # print the corrsponding quantile
-        print(spt_dic)
-
         indices_sampled_ood = [indices_candidate_ood[idx_sampled] for idx_sampled in idxs_sampled]
+        train_set_ood = Subset(train_all_set_ood, indices_sampled_ood)
+        train_loader_ood = DataLoader(train_set_ood, batch_size=args.batch_size, shuffle=True, num_workers=args.prefetch, pin_memory=True)
         train_set_ood = Subset(train_all_set_ood, indices_sampled_ood)
         train_loader_ood = DataLoader(train_set_ood, batch_size=args.sampled_ood_size_factor * args.batch_size, shuffle=True, num_workers=args.prefetch, pin_memory=True)
 
-        trainer(train_loader_id, train_loader_ood, clf, optimizer)
+        trainer(train_loader_id, train_loader_ood, clf, optimizer, linear_optimizer)
+        
         scheduler.step()
+        linear_scheduler.step()
         val_metrics  = test(test_loader, clf, num_classes)
         cla_acc = val_metrics['cla_acc']
 
@@ -235,13 +262,16 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', help='directory to store datasets', default='/data/cv')
     parser.add_argument('--id', type=str, default='cifar10')
     parser.add_argument('--ood', type=str, default='tiny_images')
-    parser.add_argument('--training', type=str, default='abs', choices=['abs'])
-    parser.add_argument('--beta', type=float, default=1.0)
-    parser.add_argument('--id_ratio', type=float, default=0.95)
-    parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='ckpts')
+    parser.add_argument('--training', type=str, default='uni', choices=['uni', 'abs'])
+    parser.add_argument('--beta', type=float, default=0.5)
+    parser.add_argument('--clf_type', type=str, default='euclidean', choices=['euclidean', 'inner'])
+    parser.add_argument('--dist', type=str, default='negative_logit', choices=['negative_logit', 'maha'])
+    parser.add_argument('--ood_quantile', type=float, default=0.125)
+    parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='outputs')
     parser.add_argument('--arch', type=str, default='wrn40')
     parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--weight_decay', type=float, default=0.0001)
+    parser.add_argument('--linear_weight_decay', type=float, default=0.0)
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=64)
