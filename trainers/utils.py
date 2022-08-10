@@ -52,7 +52,7 @@ def train_abs(data_loader_id, data_loader_ood, net, optimizer, linear_optimizer,
 
         data = torch.cat([sample_id['data'], sample_ood['data']], dim=0).cuda()
         target_id = sample_id['label'].cuda()
-        target_ood =  (torch.ones(num_ood) * num_classes).long().cuda()
+        target_ood = (torch.ones(num_ood) * num_classes).long().cuda()
 
         # forward
         logit = net(data)
@@ -74,9 +74,48 @@ def train_abs(data_loader_id, data_loader_ood, net, optimizer, linear_optimizer,
             total += num_id
 
     # average on sample
-    print('[cla loss: {:.8f} | cla acc: {:.4f}%]'.format(total_loss / len(data_loader_id.dataset), 100. * correct / total))
+    print('[cla loss: {:.8f} | cla acc: {:.4f}%]'.format(total_loss / len(data_loader_id), 100. * correct / total))
     return {
-        'cla_loss': total_loss / len(data_loader_id.dataset),
+        'cla_loss': total_loss / len(data_loader_id),
+        'cla_acc': 100. * correct / total
+    }
+
+def train_energy(data_loader_id, data_loader_ood, net, optimizer, linear_optimizer, beta=0.1):
+    net.train()
+
+    total, correct = 0, 0
+    total_loss = 0.0
+
+    for sample_id, sample_ood in zip(data_loader_id, data_loader_ood):
+        num_id = sample_id['data'].size(0)
+
+        data = torch.cat([sample_id['data'], sample_ood['data']], dim=0).cuda()
+        target = sample_id['label'].cuda()
+
+        logit = net(data)
+        loss = F.cross_entropy(logit[:num_id], target)
+        Ec_in = -torch.logsumexp(logit[:num_id], dim=1)
+        Ec_out = -torch.logsumexp(logit[num_id:], dim=1)
+        m_in = -25
+        m_out = -7
+        loss += beta * (torch.pow(F.relu(Ec_in - m_in), 2).mean() + torch.pow(F.relu(m_out-Ec_out), 2).mean())
+
+        optimizer.zero_grad()
+        linear_optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        linear_optimizer.step()
+        
+        _, pred = logit[:num_id].max(dim=1)
+        with torch.no_grad():
+            total_loss += loss.item()
+            correct += pred.eq(target).sum().item()
+            total += num_id
+
+    # average on sample
+    print('[cla loss: {:.8f} | cla acc: {:.4f}%]'.format(total_loss / len(data_loader_id), 100. * correct / total))
+    return {
+        'cla_loss': total_loss / len(data_loader_id),
         'cla_acc': 100. * correct / total
     }
 
@@ -143,6 +182,8 @@ def get_trainer(name):
         return train_uni
     elif name == 'abs':
         return train_abs
+    elif name == 'energy':
+        return train_energy
     elif name == 'trip':
         return train_trip
     else:

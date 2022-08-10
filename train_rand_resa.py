@@ -75,7 +75,7 @@ def main(args):
     print('>>> ID: {} - OOD: {}'.format(args.id, args.ood))
     num_classes = len(get_ds_info(args.id, 'classes'))
     print('>>> CLF: {}'.format(args.arch))
-    if args.training == 'uni':
+    if args.training in ['uni', 'energy']:
         # clf = get_clf(args.arch, num_classes)
         clf = get_clf(args.arch, num_classes, args.clf_type)
     elif args.training == 'abs':
@@ -100,15 +100,13 @@ def main(args):
             parameters.append(parameter)
     
     # get trainer
+    print('LR: {:.2f} - WD: {:.5f} - LWD: {:.5f} - LMS: {}'.format(args.lr, args.weight_decay, args.linear_weight_decay, args.lr_stones))
     trainer = get_trainer(args.training)
-    # optimizer = torch.optim.SGD(clf.parameters(), lr=args.lr, weight_decay=args.weight_decay, momentum=args.momentum, nesterov=True)
-    # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [50, 75, 90], 0.1)
+    lr_stones = [int(args.epochs * float(lr_stone)) for lr_stone in args.lr_stones]
     optimizer = torch.optim.SGD(parameters, lr=args.lr, weight_decay=args.weight_decay, momentum=args.momentum)
-    # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones = [int(args.epochs * 0.5), int(args.epochs * 0.75), int(args.epochs * 0.9)], gamma=0.1)
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[int(args.epochs * 0.5), int(args.epochs * 0.75)], gamma=0.1)
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=lr_stones, gamma=0.1)
     linear_optimizer = torch.optim.SGD(linear_parameters, lr=args.lr, weight_decay=args.linear_weight_decay, momentum=args.momentum) # no weight_decay
-    # linear_scheduler = torch.optim.lr_scheduler.MultiStepLR(linear_optimizer, milestones = [int(args.epochs * 0.5), int(args.epochs * 0.75), int(args.epochs * 0.9)], gamma=0.1)
-    linear_scheduler = torch.optim.lr_scheduler.MultiStepLR(linear_optimizer, milestones=[int(args.epochs * 0.5), int(args.epochs * 0.75)], gamma=0.1)
+    linear_scheduler = torch.optim.lr_scheduler.MultiStepLR(linear_optimizer, milestones=lr_stones, gamma=0.1)
 
     begin_time = time.time()
     start_epoch = 1
@@ -148,7 +146,7 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', help='directory to store datasets', default='/data/cv')
     parser.add_argument('--id', type=str, default='cifar10')
     parser.add_argument('--ood', type=str, default='tiny_images')
-    parser.add_argument('--training', type=str, default='uni', choices=['uni', 'abs'])
+    parser.add_argument('--training', type=str, default='uni', choices=['uni', 'abs', 'energy'])
     parser.add_argument('--beta', type=float, default=0.5)
     parser.add_argument('--clf_type', type=str, default='inner', choices=['euclidean', 'inner'])
     parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='outputs')
@@ -156,6 +154,7 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--weight_decay', type=float, default=0.0001)
     parser.add_argument('--linear_weight_decay', type=float, default=0.0001)
+    parser.add_argument('--lr_stones', nargs='+', default=[1.0])
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=64)

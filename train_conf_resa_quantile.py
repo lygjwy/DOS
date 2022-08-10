@@ -25,6 +25,22 @@ def init_seeds(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
+# absent class confidences
+def get_abs_softmax_weight(data_loader, clf):
+    clf.eval()
+    abs_scores = []
+
+    for sample in data_loader:
+        data = sample['data'].cuda()
+
+        with torch.no_grad():
+            logit = clf(data)
+
+        prob = torch.softmax(logit, dim=1)
+        abs_scores.extend(prob[:, -1].tolist())
+    
+    return torch.tensor(abs_scores)
+
 def get_cond_negative_softmax_weight(data_loader, clf):
     clf.eval()
     max_probs, full_probs = [], []
@@ -36,7 +52,7 @@ def get_cond_negative_softmax_weight(data_loader, clf):
             logit = clf(data)
         
         prob = torch.softmax(logit, dim=1)
-        full_probs.extend(prob)
+        full_probs.extend(prob.tolist())
         prob_max = torch.max(prob, dim=1)[0]
         max_probs.extend(prob_max.tolist())
     
@@ -113,13 +129,13 @@ def main(args):
         else:
             parameters.append(parameter)
     
+    print('LR: {:.2f} - WD: {:.5f} - LWD: {:.5f} - LMS: {}'.format(args.lr, args.weight_decay, args.linear_weight_decay, args.lr_stones))
     trainer = get_trainer(args.training)
-    # optimizer = torch.optim.SGD(clf.parameters(), lr=args.lr, weight_decay=args.weight_decay, momentum=args.momentum, nesterov=True)
-    # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [50, 75, 90], 0.1)
+    lr_stones = [int(args.epochs * float(lr_stone)) for lr_stone in args.lr_stones]
     optimizer = torch.optim.SGD(parameters, lr=args.lr, weight_decay=args.weight_decay, momentum=args.momentum)
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[int(args.epochs * 0.5), int(args.epochs * 0.75)], gamma=0.1)
-    linear_optimizer = torch.optim.SGD(linear_parameters, lr=args.lr, weight_decay=args.linear_weight_decay, momentum=args.momentum) # no weight_decay
-    linear_scheduler = torch.optim.lr_scheduler.MultiStepLR(linear_optimizer, milestones=[int(args.epochs * 0.5), int(args.epochs * 0.75)], gamma=0.1)
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=lr_stones, gamma=0.1)
+    linear_optimizer = torch.optim.SGD(linear_parameters, lr=args.lr, weight_decay=args.linear_weight_decay, momentum=args.momentum)
+    linear_scheduler = torch.optim.lr_scheduler.MultiStepLR(linear_optimizer, milestones=lr_stones, gamma=0.1)
 
     begin_time = time.time()
     start_epoch = 1
@@ -136,7 +152,10 @@ def main(args):
         train_candidate_set_ood_test = Subset(train_all_set_ood_test, indices_candidate_ood)
         train_candidate_loader_ood_test = DataLoader(train_candidate_set_ood_test, batch_size=args.batch_size_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
 
-        weights_candidate_ood, _ = get_cond_negative_softmax_weight(train_candidate_loader_ood_test, clf)
+        if args.training == 'uni':
+            weights_candidate_ood, _ = get_cond_negative_softmax_weight(train_candidate_loader_ood_test, clf)
+        elif args.training == 'abs':
+            weights_candidate_ood = get_abs_softmax_weight(train_candidate_loader_ood_test, clf)
         
         # sort then quantile
         idxs_sorted = np.argsort(weights_candidate_ood)
@@ -184,6 +203,7 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--weight_decay', type=float, default=0.0001)
     parser.add_argument('--linear_weight_decay', type=float, default=0.0001)
+    parser.add_argument('--lr_stones', nargs='+', default=[1.0])
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=64)
