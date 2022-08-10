@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-def train_uni(data_loader_id, data_loader_ood, net, optimizer, linear_optimizer, beta=0.5):
+def train_uni(data_loader_id, data_loader_ood, net, optimizer, linear_optimizer, scheduler=None, linear_scheduler=None, beta=0.5):
     net.train()
 
     total, correct = 0, 0
@@ -25,6 +25,11 @@ def train_uni(data_loader_id, data_loader_ood, net, optimizer, linear_optimizer,
         optimizer.step()
         linear_optimizer.step()
 
+        if scheduler is not None:
+            scheduler.step()
+        if linear_scheduler is not None:
+            linear_scheduler.step()
+
         # evaluate
         _, pred = logit[:num_id].max(dim=1)
         with torch.no_grad():
@@ -39,7 +44,7 @@ def train_uni(data_loader_id, data_loader_ood, net, optimizer, linear_optimizer,
         'cla_acc': 100. * correct / total
     }
 
-def train_abs(data_loader_id, data_loader_ood, net, optimizer, linear_optimizer, beta=1.0):
+def train_abs(data_loader_id, data_loader_ood, net, optimizer, linear_optimizer, scheduler=None, linear_scheduler=None, beta=1.0):
     num_classes = len(data_loader_id.dataset.classes)
     net.train()
 
@@ -66,6 +71,11 @@ def train_abs(data_loader_id, data_loader_ood, net, optimizer, linear_optimizer,
         optimizer.step()
         linear_optimizer.step()
 
+        if scheduler is not None:
+            scheduler.step()
+        if linear_scheduler is not None:
+            linear_scheduler.step()
+
         # evaluate
         _, pred = logit[:num_id, :num_classes].max(dim=1)
         with torch.no_grad():
@@ -80,7 +90,7 @@ def train_abs(data_loader_id, data_loader_ood, net, optimizer, linear_optimizer,
         'cla_acc': 100. * correct / total
     }
 
-def train_energy(data_loader_id, data_loader_ood, net, optimizer, linear_optimizer, beta=0.1):
+def train_energy(data_loader_id, data_loader_ood, net, optimizer, linear_optimizer, scheduler=None, linear_scheduler=None, beta=0.1):
     net.train()
 
     total, correct = 0, 0
@@ -105,6 +115,11 @@ def train_energy(data_loader_id, data_loader_ood, net, optimizer, linear_optimiz
         loss.backward()
         optimizer.step()
         linear_optimizer.step()
+
+        if scheduler is not None:
+            scheduler.step()
+        if linear_scheduler is not None:
+            linear_scheduler.step()
         
         _, pred = logit[:num_id].max(dim=1)
         with torch.no_grad():

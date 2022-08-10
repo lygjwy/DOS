@@ -1,6 +1,7 @@
 .vscode/
 __pycache__/
 outputs/
+outputs-depr/
 ckpts/
 ckpts-depr/
 tmp/
