@@ -103,17 +103,18 @@ def main(args):
             parameters.append(parameter)
     
     # get trainer
+    print('Optimizer: LR: {:.2f} - WD: {:.5f} - LWD: {:.5f} - Mom: {:.2f} - Nes: True'.format(args.lr, args.weight_decay, args.linear_weight_decay, args.momentum))
     trainer = get_trainer(args.training)
     lr_stones = [int(args.epochs * float(lr_stone)) for lr_stone in args.lr_stones]
     optimizer = torch.optim.SGD(parameters, lr=args.lr, weight_decay=args.weight_decay, momentum=args.momentum, nesterov=True)
     linear_optimizer = torch.optim.SGD(linear_parameters, lr=args.lr, weight_decay=args.linear_weight_decay, momentum=args.momentum, nesterov=True)
     
     if args.scheduler == 'multistep':
-        print('LR: {:.2f} - WD: {:.5f} - LWD: {:.5f} - Mom: {:.2f} - Nes: True - LMS: {}'.format(args.lr, args.weight_decay, args.linear_weight_decay, args.momentum, args.lr_stones))
+        print('Scheduler: MultiStepLR - LMS: {}'.format(args.lr_stones))
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=lr_stones, gamma=0.1)
         linear_scheduler = torch.optim.lr_scheduler.MultiStepLR(linear_optimizer, milestones=lr_stones, gamma=0.1)
     elif args.scheduler == 'lambda':
-        print('LR: {:.2f} - WD: {:.5f} - LWD: {:.5f} - Mom: {:.2f} - Nes: True'.format(args.lr, args.weight_decay, args.linear_weight_decay, args.momentum))
+        print('Scheduler: LambdaLR')
         scheduler = torch.optim.lr_scheduler.LambdaLR(
             optimizer,
             lr_lambda=lambda step: cosine_annealing(
@@ -138,6 +139,14 @@ def main(args):
     begin_time = time.time()
     start_epoch = 1
     cla_acc = 0.0
+
+    # save random initialization model
+    torch.save({
+        'epoch': 0,
+        'arch': args.arch,
+        'state_dict': copy.deepcopy(clf.state_dict()),
+        'cla_acc': 0.0
+    }, str(exp_path / '0.pth'))
 
     for epoch in range(start_epoch, args.epochs+1):
 
@@ -164,6 +173,15 @@ def main(args):
             ),
             flush=True
         )
+
+        # save interval model
+        if epoch % 10 == 1:
+            torch.save({
+                'epoch': epoch,
+                'arch': args.arch,
+                'state_dict': copy.deepcopy(clf.state_dict()),
+                'cla_acc': cla_acc
+            }, str(exp_path / (str(epoch)+'.pth')))
 
     torch.save({
         'epoch': epoch,

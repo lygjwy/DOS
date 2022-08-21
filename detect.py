@@ -6,6 +6,7 @@ import argparse
 import numpy as np
 from pathlib import Path
 from functools import partial
+import matplotlib.pyplot as plt
 from sklearn.covariance import EmpiricalCovariance
 # import sklearn.covariance
 
@@ -231,8 +232,11 @@ def main(args):
     score_id = get_score(test_loader_id, clf)
     label_id = np.ones(len(score_id))
 
+    # visualize the confidence distribution
+    plt.figure(figsize=(10, 10), dpi=100)
+    
     ood_names, fprs, aurocs, auprs = [], [], [], []
-    for test_loader_ood in test_loader_oods:
+    for i, test_loader_ood in enumerate(test_loader_oods):
         # result_dic = {'name': test_loader_ood.dataset.name}
         ood_names.append(test_loader_ood.dataset.name)
 
@@ -243,11 +247,23 @@ def main(args):
         score = np.concatenate([score_id, score_ood])
         label = np.concatenate([label_id, label_ood])
 
+        # plot the histgrams
+        bins = np.linspace(0.0, 1.0, 100)
+        plt.subplot(3, 3, i+1)
+        plt.hist(score_id, bins, color='g', label='id')
+        thr_95 = np.sort(score_id)[int(len(score_id) * 0.05)]
+        plt.axvline(thr_95)
+        plt.hist(score_ood, bins, color='r', label='ood')
+        plt.title(test_loader_ood.dataset.name)
+
         fpr, auroc, aupr, _ = compute_all_metrics(score, label)
         
         fprs.append(100. * fpr)
         aurocs.append(100. * auroc)
         auprs.append(100. * aupr)
+
+    # save the figure
+    plt.savefig(args.fig_name)
 
     # print results
     print('[ ID: {:7s} - OOD:'.format(args.id), end=' ')
@@ -284,6 +300,7 @@ if __name__ == '__main__':
     parser.add_argument('--arch', type=str, default='wrn40')
     parser.add_argument('--clf_type', type=str, default='inner', choices=['inner', 'euclidean'])
     parser.add_argument('--pretrain', type=str, default=None, help='path to pre-trained model')
+    parser.add_argument('--fig_name', type=str, default='test.png')
     parser.add_argument('--gpu_idx', type=int, default=0)
 
     args = parser.parse_args()

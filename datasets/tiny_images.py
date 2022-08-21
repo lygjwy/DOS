@@ -47,4 +47,10 @@ class TinyImages(Dataset):
         self.data_file.seek(idx * 3072)
         data = self.data_file.read(3072)
 
-        return np.fromstring(data, dtype='uint8').reshape(32, 32, 3, order='F')
+        try:
+            result = np.fromstring(data, dtype='uint8').reshape(32, 32, 3, order='F')
+        except ValueError:
+            print(idx)
+            exit()
+        else:
+            return result
