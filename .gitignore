@@ -5,3 +5,7 @@ outputs-depr/
 ckpts/
 ckpts-depr/
 tmp/
+tmp_g2_adj/
+imgs/
+binary_classification_nega_inner/
+*.png

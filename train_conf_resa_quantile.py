@@ -8,6 +8,9 @@ import random
 import argparse
 import numpy as np
 from pathlib import Path
+from scipy.stats import norm
+import matplotlib.pyplot as plt
+from sklearn.mixture import GaussianMixture as GMM
 
 import torch
 from torch import nn
@@ -62,6 +65,23 @@ def get_cond_negative_softmax_weight(data_loader, clf):
     
     return -1.0 * torch.tensor(max_probs), -1.0 * torch.tensor(full_probs)
 
+def get_cond_softmax_weight(data_loader, clf):
+    clf.eval()
+    max_probs, full_probs = [], []
+
+    for sample in data_loader:
+        data = sample['data'].cuda()
+
+        with torch.no_grad():
+            logit = clf(data)
+
+        prob = torch.softmax(logit, dim=1)
+        full_probs.extend(prob.tolist())
+        prob_max = torch.max(prob, dim=1)[0]
+        max_probs.extend(prob_max.tolist())
+
+    return np.asarray(max_probs), np.asarray(full_probs)
+
 def test(data_loader, net, num_classes):
     net.eval()
 
@@ -91,8 +111,9 @@ def test(data_loader, net, num_classes):
 def main(args):
     init_seeds(args.seed)
 
-    exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, args.clf_type, args.training, args.scheduler, 'conf', 'q_'+str(args.ood_quantile)])
-    
+    # exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, args.clf_type, args.training, args.scheduler, 'conf', 'q_'+str(args.ood_quantile)])
+    exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, args.clf_type, args.training, args.scheduler, 'conf'])
+
     print('>>> Output dir: {}'.format(str(exp_path)))
     exp_path.mkdir(parents=True, exist_ok=True)
 
@@ -175,6 +196,7 @@ def main(args):
     train_all_set_ood = get_ds(root=args.data_dir, ds_name=args.ood, split='wo_cifar', transform=train_trf_ood)
     train_all_set_ood_test = get_ds(root=args.data_dir, ds_name=args.ood, split='wo_cifar', transform=test_trf_ood)
 
+    plt.figure(figsize=(100, 100), dpi=100)
     for epoch in range(start_epoch, args.epochs+1):
         
         indices_candidate_ood = torch.randperm(len(train_all_set_ood))[:args.candidate_ood_size].tolist()
@@ -182,14 +204,93 @@ def main(args):
         train_candidate_loader_ood_test = DataLoader(train_candidate_set_ood_test, batch_size=args.batch_size_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
 
         if args.training == 'uni':
-            weights_candidate_ood, _ = get_cond_negative_softmax_weight(train_candidate_loader_ood_test, clf)
+            # weights_candidate_ood, _ = get_cond_negative_softmax_weight(train_candidate_loader_ood_test, clf)
+            weights_candidate_ood, _ = get_cond_softmax_weight(train_candidate_loader_ood_test, clf)
         elif args.training == 'abs':
             weights_candidate_ood = get_abs_softmax_weight(train_candidate_loader_ood_test, clf)
         
-        # sort then quantile
-        idxs_sorted = np.argsort(weights_candidate_ood)
-        spt = int(args.candidate_ood_size * args.ood_quantile)
-        idxs_sampled = idxs_sorted[spt:spt + args.sampled_ood_size_factor * len(train_set_id)]
+        # estimate the normal distribution & prob distribution
+        # gmm_c1 = GMM(n_components=1).fit(weights_candidate_ood.reshape(-1, 1))
+        # gmm_c2 = GMM(n_components=2).fit(weights_candidate_ood.reshape(-1, 1))
+
+        # weights_candidate_ood = np.asarray(weights_candidate_ood)
+        gmm1 = GMM(n_components=1).fit(weights_candidate_ood.reshape(-1, 1))
+        m_g1 = float(gmm1.means_[0][0])
+        s_g1 = np.sqrt(float(gmm1.covariances_[0][0][0]))
+
+        gmm2 = GMM(n_components=2).fit(weights_candidate_ood.reshape(-1, 1))
+        # gmm = GMM(n_components=1).fit(score_ood.reshape(-1, 1))
+        m_g2 = gmm2.means_
+        c_g2  = gmm2.covariances_
+        weights = gmm2.weights_
+        # print(weights)
+
+        m1_g2 = float(m_g2[0][0])
+        s1_g2 = np.sqrt(float(c_g2[0][0][0]))
+
+        m2_g2 = float(m_g2[1][0])
+        s2_g2 = np.sqrt(float(c_g2[1][0][0]))
+
+        x_axis_ = np.arange(1.0 / num_classes - 0.01, 1.0, 0.01)
+        x_axis = np.arange(1.0 / num_classes, 1.0 + 0.01, 0.01)
+        
+        # estimation for true conf distribution
+        # GMM 1
+        estimated_bin_probs_g1 = norm.cdf(x_axis, m_g1, s_g1) - norm.cdf(x_axis_, m_g1, s_g1)
+        estimated_bin_probs_g1 = [float(estimated_bin_prob_g1) / sum(estimated_bin_probs_g1[1:]) for estimated_bin_prob_g1 in estimated_bin_probs_g1[1:]] # normalize
+
+        # GMM 2
+        estimated_bin_probs_g2 = (norm.cdf(x_axis, m1_g2, s1_g2) - norm.cdf(x_axis_, m1_g2, s1_g2)) * weights[0] + (norm.cdf(x_axis, m2_g2, s2_g2) - norm.cdf(x_axis_, m2_g2, s2_g2)) * weights[1]
+        estimated_bin_probs_g2 = [float(estimated_bin_prob_g2) / sum(estimated_bin_probs_g2[1:]) for estimated_bin_prob_g2 in estimated_bin_probs_g2[1:]] # normalize
+        
+        # GMM 2 with adjusting weights
+        estimated_bin_probs_adj = (norm.cdf(x_axis, m1_g2, s1_g2) - norm.cdf(x_axis_, m1_g2, s1_g2)) * 0.5 + (norm.cdf(x_axis, m2_g2, s2_g2) - norm.cdf(x_axis_, m2_g2, s2_g2)) * 0.5
+        estimated_bin_probs_adj = [float(estimated_bin_prob_adj) / sum(estimated_bin_probs_adj[1:]) for estimated_bin_prob_adj in estimated_bin_probs_adj[1:]] # normalize
+
+        # mean = gmm.means_
+        # covs  = gmm.covariances_
+        # weights = gmm.weights_
+
+        # without weights
+        # mean = (float(gmm_c2.means_[0][0]) + float(gmm_c1.means_[0][0])) / 2.0
+        # std = (np.sqrt(float(gmm_c2.covariances_[0][0][0])) + np.sqrt(float(gmm_c1.covariances_[0][0][0]))) / 2.0
+
+        # mean = np.mean(weights_candidate_ood)
+        # std = np.std(weights_candidate_ood)
+        # bins_ = np.arange(1.0 / num_classes - 0.01, 1.0, 0.01)
+        # bins = np.arange(1.0 / num_classes, 1.0 + 0.01, 0.01)
+        # estimate target data confidence distribution
+        # estimated_bin_probs = (norm.cdf(bins, mean, std) - norm.cdf(bins_, mean, std)) * weights[0]
+        # estimated_bin_probs = norm.cdf(bins, mean, std) - norm.cdf(bins_, mean, std)
+        
+        # target_bin_probs = [float(estimated_bin_prob) / sum(estimated_bin_probs[1:]) for estimated_bin_prob in estimated_bin_probs[1:]]
+        # target_bin_probs = estimated_bin_probs_adj
+        target_bin_probs = estimated_bin_probs_g2
+        target_bin_counts = [int(args.sampled_ood_size_factor * len(train_set_id) * target_bin_prob) for target_bin_prob in target_bin_probs]
+        
+        # sort confidence into corresponding bins
+        bin_labels = np.digitize(weights_candidate_ood, x_axis)
+        bin_counts, _ = np.histogram(weights_candidate_ood, x_axis)
+        bin_probs = bin_counts / len(weights_candidate_ood)
+
+        idxs_sampled = []
+        for i, target_bin_count in enumerate(target_bin_counts):
+            target_bin_idxs = np.where(bin_labels==i+1)[0]
+            # print(target_bin_idxs.tolist())
+            # print(len(target_bin_idxs.tolist()))
+            # exit()
+            if len(target_bin_idxs) == 0:
+                # choose from the most confident bins instead of random choosing?
+                idxs_sampled.extend(random.choices(range(len(bin_labels)), k=target_bin_count))
+            else:
+                idxs_sampled.extend(random.choices(target_bin_idxs, k=target_bin_count))
+        
+        # idxs_sorted = np.argsort(weights_candidate_ood)
+        # spt = int(args.candidate_ood_size * args.ood_quantile)
+        # idxs_sampled = idxs_sorted[spt:spt + args.sampled_ood_size_factor * len(train_set_id)]
+        plt.subplot(10, 10, epoch)
+        plt.plot(x_axis[:-1], bin_probs, color='g', label='true bin probs')
+        plt.plot(x_axis[:-1], target_bin_probs, color='r', label='target bin probs')
 
         indices_sampled_ood = [indices_candidate_ood[idx_sampled] for idx_sampled in idxs_sampled]
         train_set_ood = Subset(train_all_set_ood, indices_sampled_ood)
@@ -214,6 +315,10 @@ def main(args):
             flush=True
         )
 
+    # save the figure
+    fig_path = Path('./imgs') / args.fig_name
+    plt.savefig(str(fig_path))
+
     torch.save({
         'epoch': epoch,
         'arch': args.arch,
@@ -225,6 +330,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Outlier Exposure')
     parser.add_argument('--seed', default=42, type=int, help='seed for init training')
     parser.add_argument('--data_dir', help='directory to store datasets', default='/data/cv')
+    parser.add_argument('--fig_name', type=str, default='test.png')
     parser.add_argument('--id', type=str, default='cifar10')
     parser.add_argument('--ood', type=str, default='tiny_images')
     parser.add_argument('--training', type=str, default='uni', choices=['abs', 'uni'])

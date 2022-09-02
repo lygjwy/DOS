@@ -3,6 +3,7 @@ WRN architecture (https://arxiv.org/abs/1605.07146)
 Code adapted from (https://github.com/JerryYLi/bg-resample-ood/blob/master/models/wide_resnet.py)
 """
 
+from xml.etree.ElementInclude import include
 import numpy as np
 
 import torch
@@ -51,9 +52,10 @@ class wide_basic(nn.Module):
         return out
 
 class Wide_ResNet(nn.Module):
-    def __init__(self, depth, widen_factor, dropout_rate, num_classes, in_size=32, clf_type='inner'):
+    def __init__(self, depth, widen_factor, dropout_rate, num_classes, in_size=32, clf_type='inner', include_binary=True):
         super(Wide_ResNet, self).__init__()
         self.clf_type = clf_type # ['inner', 'euclidean', 'cosine']
+        self.include_binary = include_binary
         self.in_planes = 16
 
         assert ((depth-4)%6 == 0), 'Wide ResNet depth should be 6n+4'
@@ -77,6 +79,9 @@ class Wide_ResNet(nn.Module):
             nn.init.kaiming_normal_(self.linear.weight.data, nonlinearity='relu')
         else:
             raise RuntimeError('<<< Invalid CLF TYPE: {}'.format(self.clf_type))
+        # binary classification head
+        if self.include_binary:
+            self.binary_linear = nn.Linear(1, 1) # energy as variable
         self.feature_dim = self.linear.in_features
 
         self.pool_size = in_size // 4
@@ -91,7 +96,7 @@ class Wide_ResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, x, ret_feat=False):
+    def forward(self, x, ret_feat=False, ret_el=False):
         out = self.conv1(x)
         out = self.layer1(out)
         out = self.layer2(out)
@@ -113,9 +118,27 @@ class Wide_ResNet(nn.Module):
         else:
             raise RuntimeError('<<< Invalid CLF TYPE: {}'.format(self.clf_type))
         
+        if self.include_binary:
+            # energy logit
+            energy = -torch.logsumexp(logit, dim=1).unsqueeze(1) # [BATCH, 1]
+            # print(energy.size())
+            # exit()
+            energy_logit = self.binary_linear(energy) # [BATCH, 1]
+            # w = torch.abs(self.binary_linear.weight.T) # [FEAT_DIM, 1]
+            # energy_logit = torch.mm(energy, w) + self.binary_linear.bias # [BATCH, 1]
+            # print(self.binary_linear.weight, self.binary_linear.bias)
+
+            if ret_feat:
+                if ret_el:
+                    return logit, out, energy_logit
+                else:
+                    return logit, out
+            return logit
+        
         if ret_feat:
             return logit, out
-        return logit
+        else:
+            return logit
 
 if __name__ == '__main__':
     net = Wide_ResNet(28, 10, 0.3, 10)

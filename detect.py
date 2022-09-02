@@ -147,6 +147,21 @@ def get_energy_score(data_loader, clf, temperature=1.0):
     
     return energy_score
 
+def get_binary_score(data_loader, clf):
+    clf.eval()
+
+    binary_score = []
+    for sample in data_loader:
+        data = sample['data'].cuda()
+
+        with torch.no_grad():
+            _, _, energy_logit = clf(data, ret_feat=True, ret_el=True)
+            # energy_prob = torch.max(torch.softmax(energy_logit, dim=1), dim=1)[0].tolist()
+            energy_prob = torch.sigmoid(energy_logit).squeeze().tolist()
+            binary_score.extend(energy_prob)
+    
+    return [-1.0 * bs + 1.0 for bs in binary_score]
+
 def get_acc(data_loader, clf, num_classes):
     clf.eval()
     correct, total = 0, 0
@@ -170,7 +185,8 @@ score_dic = {
     'abs': get_abs_score,
     'logit': get_logit_score,
     'maha': get_mahalanobis_score,
-    'energy': get_energy_score
+    'energy': get_energy_score,
+    'binary': get_binary_score
 }
 
 def main(args):
@@ -189,9 +205,9 @@ def main(args):
     # load CLF
     num_classes = len(get_ds_info(args.id, 'classes'))
     if args.score == 'abs':
-        clf = get_clf(args.arch, num_classes+1, args.clf_type)
-    elif args.score in ['maha', 'logit', 'energy', 'msp']:
-        clf = get_clf(args.arch, num_classes, args.clf_type)
+        clf = get_clf(args.arch, num_classes+1, args.clf_type, args.include_binary)
+    elif args.score in ['maha', 'logit', 'energy', 'msp', 'binary']:
+        clf = get_clf(args.arch, num_classes, args.clf_type, args.include_binary)
     else:
         raise RuntimeError('<<< Invalid score: '.format(args.score))
     
@@ -218,7 +234,7 @@ def main(args):
 
     get_score = score_dic[args.score]
     if args.score == 'maha':
-        train_set_id_test = get_ds(root=args.data_dir, ds_name=args.id, split='test', transform=test_trf_id)
+        train_set_id_test = get_ds(root=args.data_dir, ds_name=args.id, split='train', transform=test_trf_id)
         train_loader_id_test = DataLoader(train_set_id_test, batch_size=args.batch_size, shuffle=False, num_workers=args.prefetch, pin_memory=True)
         cat_mean, precision = sample_estimator(train_loader_id_test, clf, num_classes)
         get_score = partial(
@@ -250,10 +266,10 @@ def main(args):
         # plot the histgrams
         bins = np.linspace(0.0, 1.0, 100)
         plt.subplot(3, 3, i+1)
-        plt.hist(score_id, bins, color='g', label='id')
+        plt.hist(score_id, bins, color='g', label='id', alpha=0.5)
         thr_95 = np.sort(score_id)[int(len(score_id) * 0.05)]
-        plt.axvline(thr_95)
-        plt.hist(score_ood, bins, color='r', label='ood')
+        plt.axvline(thr_95, alpha=0.5)
+        plt.hist(score_ood, bins, color='r', label='ood', alpha=0.5)
         plt.title(test_loader_ood.dataset.name)
 
         fpr, auroc, aupr, _ = compute_all_metrics(score, label)
@@ -292,13 +308,14 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', type=str, default='/data/cv')
     parser.add_argument('--id', type=str, default='cifar10')
     parser.add_argument('--oods', nargs='+', default=['svhn', 'lsunc', 'dtd', 'places365_10k', 'cifar100', 'tinc', 'lsunr', 'tinr', 'isun'])
-    parser.add_argument('--score', type=str, default='msp', choices=['msp', 'abs', 'logit', 'maha', 'energy'])
+    parser.add_argument('--score', type=str, default='msp', choices=['msp', 'abs', 'logit', 'maha', 'energy', 'binary'])
     # parser.add_argument('--temperature', type=int, default=1000)
     # parser.add_argument('--magnitude', type=float, default=0.0014)
     parser.add_argument('--batch_size', type=int, default=200)
     parser.add_argument('--prefetch', type=int, default=16)
     parser.add_argument('--arch', type=str, default='wrn40')
     parser.add_argument('--clf_type', type=str, default='inner', choices=['inner', 'euclidean'])
+    parser.add_argument('--include_binary', action='store_true')
     parser.add_argument('--pretrain', type=str, default=None, help='path to pre-trained model')
     parser.add_argument('--fig_name', type=str, default='test.png')
     parser.add_argument('--gpu_idx', type=int, default=0)
