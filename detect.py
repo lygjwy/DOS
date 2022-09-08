@@ -205,9 +205,9 @@ def main(args):
     # load CLF
     num_classes = len(get_ds_info(args.id, 'classes'))
     if args.score == 'abs':
-        clf = get_clf(args.arch, num_classes+1, args.clf_type, args.include_binary)
+        clf = get_clf(args.arch, num_classes+1, args.include_binary)
     elif args.score in ['maha', 'logit', 'energy', 'msp', 'binary']:
-        clf = get_clf(args.arch, num_classes, args.clf_type, args.include_binary)
+        clf = get_clf(args.arch, num_classes, args.include_binary)
     else:
         raise RuntimeError('<<< Invalid score: '.format(args.score))
     
@@ -314,7 +314,6 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=200)
     parser.add_argument('--prefetch', type=int, default=16)
     parser.add_argument('--arch', type=str, default='wrn40')
-    parser.add_argument('--clf_type', type=str, default='inner', choices=['inner', 'euclidean'])
     parser.add_argument('--include_binary', action='store_true')
     parser.add_argument('--pretrain', type=str, default=None, help='path to pre-trained model')
     parser.add_argument('--fig_name', type=str, default='test.png')

@@ -102,7 +102,8 @@ def main(args):
     init_seeds(args.seed)
 
     # specify output dir
-    exp_path = Path(args.output_dir) / args.dataset / '-'.join([args.arch, args.clf_type, 'ce', args.scheduler])
+    # exp_path = Path(args.output_dir) / args.dataset / '-'.join([args.arch, args.clf_type, 'ce', args.scheduler])
+    exp_path = Path(args.output_dir) / args.dataset / '-'.join([args.arch, 'ce', args.scheduler])
     print('>>> Output Dir {}'.format(str(exp_path)))
     exp_path.mkdir(parents=True, exist_ok=True)
     
@@ -124,7 +125,7 @@ def main(args):
     # instantiate net
     num_classes = len(get_ds_info(args.dataset, 'classes'))
     print('>>> CLF {}'.format(args.arch))
-    clf = get_clf(args.arch, num_classes, args.clf_type)
+    clf = get_clf(args.arch, num_classes)
     clf = nn.DataParallel(clf)
 
     # move CLF to gpu device
@@ -228,7 +229,6 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', type=str, default='cifar10')
     parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='outputs')
     parser.add_argument('--arch', type=str, default='wrn40')
-    parser.add_argument('--clf_type', type=str, default='inner', choices=['euclidean', 'inner'])
     parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--weight_decay', type=float, default=0.0001)
     parser.add_argument('--linear_weight_decay', type=float, default=0.0001)

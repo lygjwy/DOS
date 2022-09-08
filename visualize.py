@@ -120,6 +120,24 @@ def get_mahalanobis_score(data_loader, clf, num_classes, sample_mean, precision)
 
     return nm_score
 
+def get_abs_score(data_loader, clf):
+    '''
+    Probability for absent class
+    '''
+    clf.eval()
+
+    abs_score = []
+    for sample in data_loader:
+        data = sample['data'].cuda()
+
+        with torch.no_grad():
+            logit = clf(data)
+
+            prob = torch.softmax(logit, dim=1)
+            abs_score.extend(prob[:, -1].tolist())
+
+    return [1 - abs for abs in abs_score]
+
 def get_energy_score(data_loader, clf, temperature=1.0):
     clf.eval()
     
@@ -274,59 +292,11 @@ def visualize_score(data_loader_id, data_loader_ood, clf):
     fig_path = Path('./imgs') / args.fig_name
     plt.savefig(str(fig_path))
 
-def visualize_trend(data_loader, clf):
-    plt.clf()
-    plt.figure(figsize=(100, 100), dpi=100)
-
-    # for model_name in args.models:
-    for i in range(100):
-        plt.subplot(10, 10, i+1)
-
-        clf_path = Path(args.output_dir) / (str(i) + '.pth')
-
-        if clf_path.is_file():
-            clf_state = torch.load(str(clf_path))
-            cla_acc = clf_state['cla_acc']
-            clf.load_state_dict(clf_state['state_dict'])
-            print('>>> load classifier from {} (classification acc {:.4f}%)'.format(str(clf_path), cla_acc))
-        else:
-            raise RuntimeError('<--- invlaid classifier path: {}'.format(str(clf_path)))
-
-        # move CLF to gpu device
-        gpu_idx = int(args.gpu_idx)
-        if torch.cuda.is_available():
-            torch.cuda.set_device(gpu_idx)
-            clf.cuda()
-            torch.cuda.manual_seed(args.seed)
-        cudnn.benchmark = True
-    
-        # logit_score = np.asarray(get_logit_score(data_loader, clf))
-        prob_score = np.asarray(get_msp_score(data_loader, clf))
-        energy_score = np.asarray(get_energy_score(data_loader, clf))
-
-        # sort by logit score
-        # sorted_idxs_by_logit = np.argsort(logit_score)
-        sorted_idxs = np.argsort(prob_score)
-        # print(sorted_idxs_by_logit)
-        # exit()
-
-        x_axis = np.arange(len(sorted_idxs))
-        # sorted_logit_score = logit_score[sorted_idxs_by_logit]
-        sorted_prob_score = prob_score[sorted_idxs]
-        sorted_energy_score = energy_score[sorted_idxs]
-
-        # plt.plot(x_axis, sorted_logit_score, 'go-', x_axis, sorted_prob_score, 'r+-', x_axis, sorted_energy_score, 'b^-')
-        plt.plot(x_axis, sorted_prob_score, 'r+-', x_axis, sorted_energy_score, 'b^-')
-
-        plt.title(str(i))
-    
-    fig_path = Path('./imgs') / args.fig_name
-    plt.savefig(str(fig_path))
-
 score_dic = {
     'msp': get_msp_score,
     'logit': get_logit_score,
     'maha': get_mahalanobis_score,
+    'abs': get_abs_score,
     'energy': get_energy_score,
     'binary': get_binary_score
 }
@@ -346,9 +316,15 @@ def main(args):
 
     # load CLF
     num_classes = len(get_ds_info(args.id, 'classes'))
-    clf = get_clf(args.arch, num_classes, args.clf_type)
-    clf = nn.DataParallel(clf)
+    num_classes = len(get_ds_info(args.id, 'classes'))
+    if args.score == 'abs':
+        clf = get_clf(args.arch, num_classes+1, args.include_binary)
+    elif args.score in ['maha', 'logit', 'energy', 'msp', 'binary']:
+        clf = get_clf(args.arch, num_classes, args.include_binary)
+    else:
+        raise RuntimeError('<<< Invalid score: '.format(args.score))
     
+    clf = nn.DataParallel(clf)
     # visualize
     # visualize_trend(test_loader_ood, clf)
     # visualize_score(test_loader_id, test_loader_ood, clf, num_classes)
@@ -359,11 +335,11 @@ if __name__ == '__main__':
     parser.add_argument('--seed', default=42, type=int, help='seed for initialize detection')
     parser.add_argument('--data_dir', type=str, default='/data/cv')
     parser.add_argument('--id', type=str, default='cifar10')
-    parser.add_argument('--score', type=str, default='msp', choices=['msp', 'logit', 'maha', 'energy', 'binary'])
+    parser.add_argument('--score', type=str, default='msp', choices=['msp', 'logit', 'maha', 'energy', 'abs', 'binary'])
     parser.add_argument('--batch_size', type=int, default=200)
     parser.add_argument('--prefetch', type=int, default=16)
     parser.add_argument('--arch', type=str, default='wrn40')
-    parser.add_argument('--clf_type', type=str, default='inner', choices=['inner', 'euclidean'])
+    parser.add_argument('--include_binary', action='store_true')
     parser.add_argument('--output_dir', type=str, default='./ckpts')
     parser.add_argument('--sampled_ood_size_factor', type=int, default=2)
     parser.add_argument('--fig_name', type=str, default='test.png')
