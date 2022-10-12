@@ -134,7 +134,7 @@ def train_energy(data_loader_id, data_loader_ood, net, optimizer, linear_optimiz
         'cla_acc': 100. * correct / total
     }
 
-def train_binary(data_loader_id, data_loader_ood, net, optimizer, linear_optimizer, scheduler=None, linear_scheduler=None, beta=2.0):
+def train_binary(data_loader_id, data_loader_ood, net, optimizer, linear_optimizer, scheduler=None, linear_scheduler=None, beta=2.0, pos_w=1.0):
     net.train()
 
     total, correct = 0, 0
@@ -148,13 +148,12 @@ def train_binary(data_loader_id, data_loader_ood, net, optimizer, linear_optimiz
         target = sample_id['label'].cuda()
 
         # forward
-        logit, _, energy_logit = net(data, ret_feat=True, ret_el=True) # [NUM, 1]
+        logit, energy_logit = net(data) # [NUM, 1]
         cla_loss = F.cross_entropy(logit[:num_id], target)
         binary_target = torch.cat([torch.zeros([num_id,]), torch.ones([num_ood,])], dim=0).unsqueeze(1).cuda()
-        # weights = torch.cat([2.0 * torch.ones([num_id,]), torch.ones([num_ood,])], dim=0).unsqueeze(1).cuda() # balancing the ID & OOD
-        # binary_loss = F.binary_cross_entropy_with_logits(energy_logit, binary_target, weight=weights)
-        # binary_loss = F.binary_cross_entropy_with_logits(energy_logit, binary_target, pos_weight=torch.tensor([0.5]).cuda())
-        binary_loss = F.binary_cross_entropy_with_logits(energy_logit, binary_target)
+        # binary_loss = F.binary_cross_entropy_with_logits(energy_logit, binary_target)
+        p_w = torch.FloatTensor([pos_w]).cuda()
+        binary_loss = F.binary_cross_entropy_with_logits(energy_logit, binary_target, pos_weight=p_w)
         loss = cla_loss + beta * binary_loss
 
         # backward

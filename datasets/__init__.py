@@ -87,10 +87,8 @@ def get_ood_trf(ds_name_id, ds_name_ood, stage):
     if stage == 'train':
         ood_trf = {
             'tiny_images': [
-                # transforms.ToTensor(), 
-                # transforms.ToPILImage(), 
-                transforms.RandomHorizontalFlip(), 
-                transforms.RandomCrop(32, padding=4), 
+                transforms.RandomCrop(32, padding=4),
+                transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 transforms.Normalize(mean, std)
             ],

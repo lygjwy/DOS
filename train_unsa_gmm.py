@@ -3,6 +3,7 @@ Tuning or training with auxiliary OOD training data by classification resampling
 '''
 
 import copy
+from math import ceil
 import time
 import random
 import argparse
@@ -80,7 +81,11 @@ def test(data_loader, net, num_classes):
 def main(args):
     init_seeds(args.seed)
 
-    exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, args.training, args.scheduler, 'gmm', 'b_'+str(args.beta), 'e_'+str(args.epochs)])
+    # exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, args.training, args.scheduler, 'gmm', 'b_'+str(args.beta), 'wp_'+str(args.warmup), 'c1e_'+str(args.c1e), 'c2e_'+str(args.c2e), 'c3e_'+str(args.c3e)])
+    # exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, args.training, args.scheduler, 'gmm', 'b_'+str(args.beta), 'lc_start'+str(args.lc_start)])
+    # exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, args.training, args.scheduler, 'gmm', 'b_'+str(args.beta), 'wp_'+str(args.warmup), 'c1e_'+str(args.c1e), 'c2e_min_'+str(args.c2e_min), 'c2e_max_'+str(args.c2e_max), 'c3e_'+str(args.c3e)])
+    exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, args.training, args.scheduler, 'gmm', 'b_'+str(args.beta), 'wp_'+str(args.warmup), 'w1_w3_w2'])
+
     exp_path.mkdir(parents=True, exist_ok=True)
 
     setup_logger(str(exp_path), 'console.log')
@@ -170,64 +175,92 @@ def main(args):
         train_candidate_set_ood_test = Subset(train_all_set_ood_test, indices_candidate_ood)
         train_candidate_loader_ood_test = DataLoader(train_candidate_set_ood_test, batch_size=args.batch_size_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
 
-        weights_candidate_ood = get_weight(train_candidate_loader_ood_test, clf)
+        if epoch > args.warmup:
+            weights_candidate_ood = np.asarray(get_weight(train_candidate_loader_ood_test, clf))
 
-        # weights_candidate_ood = np.asarray(weights_candidate_ood)
-        gmm1 = GMM(n_components=1).fit(weights_candidate_ood.reshape(-1, 1))
-        m_g1 = float(gmm1.means_[0][0])
-        s_g1 = np.sqrt(float(gmm1.covariances_[0][0][0]))
+            bin_counts, bins = np.histogram(weights_candidate_ood, bins=100) # true OOD data weights distribution
+            bin_probs = bin_counts / len(weights_candidate_ood)
 
-        gmm2 = GMM(n_components=2).fit(weights_candidate_ood.reshape(-1, 1))
-        m_g2 = gmm2.means_
-        c_g2  = gmm2.covariances_
-        weights = gmm2.weights_
-        print(weights)
+            gmm = GMM(n_components=3).fit(weights_candidate_ood.reshape(-1, 1))
+            m_g = gmm.means_
+            c_g  = gmm.covariances_
+            w_g = gmm.weights_
 
-        m1_g2 = float(m_g2[0][0])
-        s1_g2 = np.sqrt(float(c_g2[0][0][0]))
+            g_seq = np.argsort(m_g, axis=0).squeeze()
+            
+            m1 = float(m_g[g_seq[0]][0])
+            s1 = np.sqrt(float(c_g[g_seq[0]][0][0]))
+            w1 = w_g[g_seq[0]]
 
-        m2_g2 = float(m_g2[1][0])
-        s2_g2 = np.sqrt(float(c_g2[1][0][0]))
+            m2 = float(m_g[g_seq[1]][0])
+            s2 = np.sqrt(float(c_g[g_seq[1]][0][0]))
+            w2 = w_g[g_seq[1]]
 
-        bin_counts, bins = np.histogram(weights_candidate_ood, bins=100) # true data weights distribution
-        
-        # estimation for true conf distribution
-        # GMM 1
-        estimated_bin_probs_g1 = norm.cdf(bins[1:], m_g1, s_g1) - norm.cdf(bins[:-1], m_g1, s_g1)
-        estimated_bin_probs_g1 = [float(estimated_bin_prob_g1) / sum(estimated_bin_probs_g1) for estimated_bin_prob_g1 in estimated_bin_probs_g1] # normalize
+            m3 = float(m_g[g_seq[2]][0])
+            s3 = np.sqrt(float(c_g[g_seq[2]][0][0]))
+            w3 = w_g[g_seq[2]]
 
-        # GMM 2
-        estimated_bin_probs_g2 = (norm.cdf(bins[1:], m1_g2, s1_g2) - norm.cdf(bins[:-1], m1_g2, s1_g2)) * weights[0] + (norm.cdf(bins[1:], m2_g2, s2_g2) - norm.cdf(bins[:-1], m2_g2, s2_g2)) * weights[1]
-        estimated_bin_probs_g2 = [float(estimated_bin_prob_g2) / sum(estimated_bin_probs_g2) for estimated_bin_prob_g2 in estimated_bin_probs_g2] # normalize
-        
-        # GMM 2 with adjusting weights
-        estimated_bin_probs_adj = (norm.cdf(bins[1:], m1_g2, s1_g2) - norm.cdf(bins[:-1], m1_g2, s1_g2)) * 0.5 + (norm.cdf(bins[1:], m2_g2, s2_g2) - norm.cdf(bins[:-1], m2_g2, s2_g2)) * 0.5
-        estimated_bin_probs_adj = [float(estimated_bin_prob_adj) / sum(estimated_bin_probs_adj) for estimated_bin_prob_adj in estimated_bin_probs_adj] # normalize
+            print(w1, w2, w3)
+            estimated_bin_probs_c1 = norm.cdf(bins[1:], m1, s1) - norm.cdf(bins[:-1], m1, s1)
+            estimated_bin_probs_c2 = norm.cdf(bins[1:], m2, s2) - norm.cdf(bins[:-1], m2, s2)
+            estimated_bin_probs_c3 = norm.cdf(bins[1:], m3, s3) - norm.cdf(bins[:-1], m3, s3)
+            # estimated_bin_probs_g = estimated_bin_probs_c1 * w1 + estimated_bin_probs_c2 * w2 +  estimated_bin_probs_c3 * w3
+            # c2e = args.c2e_max - epoch / args.epochs * (args.c2e_max - args.c2e_min)
+            # estimated_bin_probs_g_adj = estimated_bin_probs_c1 * w1 * args.c1e + estimated_bin_probs_c2 * w2 * args.c2e +  estimated_bin_probs_c3 * w3 * args.c3e
+            # estimated_bin_probs_g_adj = estimated_bin_probs_c1 * w1 * args.c1e + estimated_bin_probs_c2 * w2 * c2e +  estimated_bin_probs_c3 * w3 * args.c3e
+            estimated_bin_probs_g_adj = estimated_bin_probs_c1 * (w1 + w3) + estimated_bin_probs_c2 * w2
 
-        target_bin_probs = estimated_bin_probs_adj
-        target_bin_counts = [int(args.sampled_ood_size_factor * len(train_set_id) * target_bin_prob) for target_bin_prob in target_bin_probs]
-        
-        # sort confidence into corresponding bins
-        bin_labels = np.digitize(weights_candidate_ood, bins)
-        bin_probs = bin_counts / len(weights_candidate_ood)
+            estimated_bin_probs_c1 = [float(estimated_bin_prob_c1) / sum(estimated_bin_probs_c1) for estimated_bin_prob_c1 in estimated_bin_probs_c1] # normalize
+            estimated_bin_probs_c2 = [float(estimated_bin_prob_c2) / sum(estimated_bin_probs_c2) for estimated_bin_prob_c2 in estimated_bin_probs_c2] # normalize
+            estimated_bin_probs_c3 = [float(estimated_bin_prob_c3) / sum(estimated_bin_probs_c3) for estimated_bin_prob_c3 in estimated_bin_probs_c3] # normalize
+            # estimated_bin_probs_g = [float(estimated_bin_prob_g) / sum(estimated_bin_probs_g) for estimated_bin_prob_g in estimated_bin_probs_g] # normalize
+            estimated_bin_probs_g_adj = [float(estimated_bin_prob_g_adj) / sum(estimated_bin_probs_g_adj) for estimated_bin_prob_g_adj in estimated_bin_probs_g_adj] # normalize
 
-        idxs_sampled = []
-        for i, target_bin_count in enumerate(target_bin_counts):
-            target_bin_idxs = np.where(bin_labels==i+1)[0]
-            # print(target_bin_idxs.tolist())
-            # print(len(target_bin_idxs.tolist()))
-            # exit()
-            if len(target_bin_idxs) == 0:
-                # choose from the most confident bins instead of random choosing?
-                idxs_sampled.extend(random.choices(range(len(bin_labels)), k=target_bin_count))
-            else:
-                idxs_sampled.extend(random.choices(target_bin_idxs, k=target_bin_count))
-        
-        plt.subplot(10, 10, epoch)
-        plt.plot(bins[:-1], bin_probs, color='g', label='true bin probs')
-        plt.plot(bins[:-1], target_bin_probs, color='r', label='target bin probs')
+            target_bin_probs = estimated_bin_probs_g_adj
+            target_bin_counts = [ceil(args.sampled_ood_size_factor * len(train_set_id) * target_bin_prob) for target_bin_prob in target_bin_probs]
+            
+            plt.subplot(10, 10, epoch)
+            plt.plot(bins[:-1], bin_probs, color='r', label='true bin probs')
+            # plt.plot(bins[:-1], estimated_bin_probs_g, color='r', alpha=0.5)
+            plt.plot(bins[:-1], target_bin_probs, color='b', linestyle='dashed', label='target bin probs', alpha=0.8)
 
-        indices_sampled_ood = [indices_candidate_ood[idx_sampled] for idx_sampled in idxs_sampled]
+            sep_line = True
+            for bin_ in bins[::-1][1:]:
+                if sep_line:
+                    binary_ = torch.sigmoid(clf.module.binary_linear.weight.detach().cpu() * np.array(bin_)).squeeze().item()
+                    if binary_ < 0.99:
+                        plt.axvline(x=bin_, ls="-", c="green")
+                        sep_line = False
+
+            # sort confidence into corresponding bins
+            bin_labels = np.digitize(weights_candidate_ood, bins)
+            idxs_sampled = []
+            for i, target_bin_count in enumerate(target_bin_counts):
+                if target_bin_count > 0:
+                    target_bin_idxs = np.where(bin_labels==i+1)[0]
+                    if len(target_bin_idxs) == 0:
+                        # random sampling
+                        idxs_sampled.extend(random.sample(range(len(bin_labels)), k=target_bin_count))
+                    else:
+                        if len(target_bin_idxs) < target_bin_count:
+                            idxs_sampled.extend(target_bin_idxs.tolist())
+                            idxs_sampled.extend(random.sample(range(len(bin_labels)), k=target_bin_count-len(target_bin_idxs))) # random
+                            # idxs_sampled.extend(random.choices(target_bin_idxs.tolist(), k=target_bin_count-len(target_bin_idxs))) # replacement
+                        else:
+                            idxs_sampled.extend(random.sample(target_bin_idxs.tolist(), k=target_bin_count))
+            
+            #  visualize the true target sampling distribution
+            weights_target_ood = weights_candidate_ood[idxs_sampled]
+            true_target_bin_counts, _ = np.histogram(weights_target_ood, bins)
+            true_target_bin_probs = true_target_bin_counts / len(weights_target_ood)
+            plt.plot(bins[:-1], true_target_bin_probs, color='g', linestyle='dashed', alpha=0.8)
+
+            indices_sampled_ood = [indices_candidate_ood[idx_sampled] for idx_sampled in idxs_sampled]
+        else:
+            indices_sampled_ood = torch.randperm(len(train_all_set_ood))[:args.sampled_ood_size_factor * len(train_set_id)].tolist()
+
+        print(len(indices_sampled_ood))
+
         train_set_ood = Subset(train_all_set_ood, indices_sampled_ood)
         train_loader_ood = DataLoader(train_set_ood, batch_size=args.sampled_ood_size_factor * args.batch_size, shuffle=True, num_workers=args.prefetch, pin_memory=True)
 
@@ -250,6 +283,13 @@ def main(args):
             flush=True
         )
 
+        torch.save({
+            'epoch': epoch,
+            'arch': args.arch,
+            'state_dict': copy.deepcopy(clf.state_dict()),
+            'cla_acc': cla_acc
+        }, str(exp_path / (str(epoch)+'.pth')))
+    
     # save the figure
     fig_path = Path('./imgs') / args.fig_name
     plt.savefig(str(fig_path))
@@ -268,15 +308,22 @@ if __name__ == '__main__':
     parser.add_argument('--fig_name', type=str, default='test.png')
     parser.add_argument('--id', type=str, default='cifar10')
     parser.add_argument('--ood', type=str, default='tiny_images')
-    parser.add_argument('--training', type=str, default='uni', choices=['abs', 'uni', 'energy', 'binary'])
-    parser.add_argument('--weighting', type=str, default='uni', choices=['uni', 'abs', 'energy', 'binary'])
-    parser.add_argument('--beta', type=float, default=0.5)
+    parser.add_argument('--training', type=str, default='uni', choices=['uni', 'abs', 'energy', 'binary'])
+    parser.add_argument('--weighting', type=str, default='msp', choices=['msp', 'abs', 'energy', 'binary'])
+    parser.add_argument('--beta', type=float, default=2.0)
+    parser.add_argument('--warmup', type=int, default=0)
+    # parser.add_argument('--c1e', type=float, default=1.0)
+    # parser.add_argument('--c2e', type=float, default=1.0)
+    # parser.add_argument('--c2e_max', type=float, default=1.0)
+    # parser.add_argument('--c2e_min', type=float, default=1.0)
+    # parser.add_argument('--c3e', type=float, default=1.0)
+    parser.add_argument('--include_binary', action='store_true')
     parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='outputs')
     parser.add_argument('--arch', type=str, default='wrn40')
     parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--weight_decay', type=float, default=0.0001)
     parser.add_argument('--linear_weight_decay', type=float, default=0.0001)
-    parser.add_argument('--scheduler', type=str, default='multistep', choices=['lambda', 'multistep'])
+    parser.add_argument('--scheduler', type=str, default='lambda', choices=['lambda', 'multistep'])
     parser.add_argument('--lr_stones', nargs='+', default=[0.5, 0.75, 0.9])
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--epochs', type=int, default=100)

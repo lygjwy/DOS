@@ -155,9 +155,12 @@ def get_binary_score(data_loader, clf):
         data = sample['data'].cuda()
 
         with torch.no_grad():
-            _, _, energy_logit = clf(data, ret_feat=True, ret_el=True)
-            # energy_prob = torch.max(torch.softmax(energy_logit, dim=1), dim=1)[0].tolist()
-            energy_prob = torch.sigmoid(energy_logit).squeeze().tolist()
+            if args.include_binary:
+                logit, _ = clf(data)
+            else:
+                logit = clf(data)
+            energy =-torch.logsumexp(logit, dim=1)
+            energy_prob = torch.sigmoid(energy).squeeze().tolist()
             binary_score.extend(energy_prob)
     
     return [-1.0 * bs + 1.0 for bs in binary_score]
@@ -211,7 +214,7 @@ def main(args):
     else:
         raise RuntimeError('<<< Invalid score: '.format(args.score))
     
-    clf = nn.DataParallel(clf)
+    # clf = nn.DataParallel(clf)
     clf_path = Path(args.pretrain)
 
     if clf_path.is_file():
