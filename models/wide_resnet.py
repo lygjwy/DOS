@@ -62,6 +62,7 @@ class wide_basic(nn.Module):
 class Wide_ResNet(nn.Module):
     def __init__(self, depth, widen_factor, dropout_rate, num_classes, in_size=32):
         super(Wide_ResNet, self).__init__()
+        self.include_binary = False
         self.in_planes = 16
 
         assert ((depth-4)%6 == 0), 'Wide ResNet depth should be 6n+4'
@@ -109,6 +110,7 @@ class Wide_ResNet(nn.Module):
 class Wide_ResNet_Binary(nn.Module):
     def __init__(self, depth, widen_factor, dropout_rate, num_classes, in_size=32):
         super(Wide_ResNet_Binary, self).__init__()
+        self.include_binary = True
         self.in_planes = 16
 
         assert ((depth-4)%6 == 0), 'Wide ResNet depth should be 6n+4'

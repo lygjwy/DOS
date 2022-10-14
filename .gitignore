@@ -1,7 +1,8 @@
 .vscode/
 __pycache__/
 outputs/
-seed-*/
+esd/
+isd/
 tmp/
 temp/
 *.png
