@@ -1,6 +1,8 @@
 from torchvision import transforms
 
 from .tiny_images import TinyImages
+from .ti_300k import TI300K
+from .imagenet_64 import ImageNet64
 from .named_dataset_with_meta import NamedDatasetWithMeta
 
 CIFAR100_CLASSES = [
@@ -69,6 +71,12 @@ def get_ds(root, ds_name, split, transform, target_transform=None):
     if ds_name == 'tiny_images':
         print('---> Loading Tiny Images (split={} for partition)'.format(split))
         ds = TinyImages(root, transform, split=split)
+    elif ds_name == 'ti_300k':
+        print('---> Loading TI 300K')
+        ds = TI300K(root, transform, split=split)
+    elif ds_name == 'imagenet_64':
+        print('---> Loading ImageNet 64 (split={} for partition)'.format(split))
+        ds = ImageNet64(root, transform, split=split)
     else:
         ds = NamedDatasetWithMeta(
             root=root,
@@ -92,6 +100,20 @@ def get_ood_trf(ds_name_id, ds_name_ood, stage):
                 transforms.ToTensor(),
                 transforms.Normalize(mean, std)
             ],
+            'ti_300k': [
+                transforms.ToTensor(),
+                transforms.ToPILImage(),
+                transforms.RandomCrop(32, padding=4),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize(mean, std)
+            ],
+            'imagenet_64': [
+                transforms.RandomCrop(32, padding=4),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize(mean, std)
+            ]
         }
     elif stage == 'test':
         ood_trf = {
@@ -105,7 +127,9 @@ def get_ood_trf(ds_name_id, ds_name_ood, stage):
             'isun': [transforms.ToTensor(), transforms.Normalize(mean, std)],
             'cifar10': [transforms.ToTensor(), transforms.Normalize(mean, std)],
             'cifar100': [transforms.ToTensor(), transforms.Normalize(mean, std)],
-            'tiny_images': [transforms.ToTensor(), transforms.Normalize(mean, std)]
+            'tiny_images': [transforms.ToTensor(), transforms.Normalize(mean, std)],
+            'ti_300k': [transforms.ToTensor(), transforms.Normalize(mean, std)],
+            'imagenet_64': [transforms.Resize(32), transforms.CenterCrop(32), transforms.ToTensor(), transforms.Normalize(mean, std)]
         }
     else:
         raise Exception('---> Dataset Stage: {} invalid'.format(stage))

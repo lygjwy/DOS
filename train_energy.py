@@ -9,6 +9,9 @@ import argparse
 import numpy as np
 from pathlib import Path
 
+from sklearn.cluster import KMeans
+from sklearn.metrics import calinski_harabasz_score
+
 import torch
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
@@ -19,6 +22,7 @@ from trainers import get_trainer
 from utils import setup_logger
 from datasets import get_ds_info, get_ds_trf, get_ood_trf, get_ds
 from scores import get_weight
+
 
 def init_seeds(seed):
     random.seed(seed)
@@ -47,10 +51,7 @@ def test(data_loader, clf, num_classes):
 
         with torch.no_grad():
             # forward
-            if clf.include_binary:
-                logit, _ = clf(data)
-            else:
-                logit = clf(data)
+            logit = clf(data)
         total_loss += F.cross_entropy(logit, target).item()
 
         _, pred = logit[:, :num_classes].max(dim=1)
@@ -73,7 +74,7 @@ def main(args):
         random.seed(epoch_seeds[i])
         epoch_seeds.append(random.randint(1000 * i, 1000 * (i+1)))
     
-    exp_path = Path(args.output_dir) / (args.id + '-' + args.ood) / '-'.join([args.arch, args.training, 'b_'+str(args.beta), args.scheduler, 'rand'])
+    exp_path = Path(args.output_dir) / ('s' + str(args.seed)) / (args.id + '-' + str(args.size_factor_sampled_ood) + '_' + args.ood) / '-'.join([args.arch, args.training, 'b_'+str(args.beta), args.scheduler, 'rand_epoch'])
     exp_path.mkdir(parents=True, exist_ok=True)
 
     setup_logger(str(exp_path), 'console.log')
@@ -85,10 +86,14 @@ def main(args):
     test_trf_ood = get_ood_trf(args.id, args.ood, 'test')
 
     train_set_id = get_ds(root=args.data_dir, ds_name=args.id, split='train', transform=train_trf_id)
-    train_all_set_ood = get_ds(root=args.data_dir, ds_name=args.ood, split='wo_cifar', transform=train_trf_ood)
     test_set_id = get_ds(root=args.data_dir, ds_name=args.id, split='test', transform=test_trf_id)
-    test_all_set_ood = get_ds(root=args.data_dir, ds_name=args.ood, split='wo_cifar', transform=test_trf_ood)
-
+    if args.ood == 'tiny_images':
+        train_all_set_ood = get_ds(root=args.data_dir, ds_name='tiny_images', split='wo_cifar', transform=train_trf_ood)
+        test_all_set_ood = get_ds(root=args.data_dir, ds_name='tiny_images', split='wo_cifar', transform=test_trf_ood)
+    elif args.ood in ['ti_300k', 'imagenet_64']:
+        train_all_set_ood = get_ds(root=args.data_dir, ds_name=args.ood, split='train', transform=train_trf_ood)
+        test_all_set_ood = get_ds(root=args.data_dir, ds_name=args.ood, split='train', transform=test_trf_ood)
+    
     train_loader_id = DataLoader(train_set_id, batch_size=args.batch_size, shuffle=True, num_workers=args.prefetch, pin_memory=True)
     test_loader_id = DataLoader(test_set_id, batch_size=args.batch_size, shuffle=False, num_workers=args.prefetch, pin_memory=True)
 
@@ -99,20 +104,18 @@ def main(args):
         clf = get_clf(args.arch, num_classes)
     elif args.training == 'abs':
         clf = get_clf(args.arch, num_classes+1)
-    elif args.training == 'binary':
-        clf = get_clf(args.arch, num_classes, include_binary=True)
     
     # move CLF to gpus
     gpu_idx = int(args.gpu_idx)
     if torch.cuda.is_available():
         torch.cuda.set_device(gpu_idx)
         clf.cuda()
-    clf.apply(weights_init)
+    # clf.apply(weights_init)
 
     # training parameters
     parameters, linear_parameters = [], []
     for name, parameter in clf.named_parameters():
-        if name in ['linear.weight', 'linear.bias', 'binary_linear.weight', 'binary_linear.bias']:
+        if name in ['linear.weight', 'linear.bias']:
             linear_parameters.append(parameter)
         else:
             parameters.append(parameter)
@@ -154,50 +157,30 @@ def main(args):
     start_epoch = 1
     cla_acc = 0.0
 
-    all_indices_sampled_ood = set()
+    epoch_size_sampled_ood = int(args.size_factor_sampled_ood * len(train_set_id))
+    batch_size_sampled_ood = int(args.size_factor_sampled_ood * args.batch_size)
+
     for epoch in range(start_epoch, args.epochs+1):
         
         init_seeds(epoch_seeds[epoch])
         
         # candidate
-        indices_candidate_ood = torch.randperm(len(train_all_set_ood))[:args.candidate_ood_size].tolist() # 2 ** 20 = 1048576
-        print('ICO:', indices_candidate_ood[:10])
+        indices_candidate_ood = np.array(random.sample(range(len(train_all_set_ood)), args.size_candidate_ood))
         
         # sampled
-        idxs_sampled = torch.randperm(len(indices_candidate_ood))[:args.sampled_ood_size_factor * len(train_set_id)].tolist() # 100000
-        indices_sampled_ood = [indices_candidate_ood[idx_sampled] for idx_sampled in idxs_sampled]
-        print('ISO:', indices_sampled_ood[:10])
-
-        # calculate proximity & diversity
-        test_set_ood = Subset(test_all_set_ood, indices_sampled_ood)
-        test_loader_ood = DataLoader(test_set_ood, batch_size=args.batch_size_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
-        weights_ood_test = get_weight(test_loader_ood, clf, args.weighting)
-        print('Proximity:', np.mean(weights_ood_test))
-        print('Diversity:', 1.0 - len(set(indices_sampled_ood) & all_indices_sampled_ood) / len(indices_sampled_ood))
-        all_indices_sampled_ood.update(indices_sampled_ood)
+        idxs_sampled = np.array(random.sample(range(len(indices_candidate_ood)), epoch_size_sampled_ood))
+        indices_sampled_ood = indices_candidate_ood[idxs_sampled]
 
         # training
         train_set_ood = Subset(train_all_set_ood, indices_sampled_ood)
-        train_loader_ood = DataLoader(train_set_ood, batch_size=args.sampled_ood_size_factor * args.batch_size, shuffle=False, num_workers=args.prefetch, pin_memory=True)
-        
-        if args.training == 'binary':
-            if epoch <= 10:
-                pos_w = 0.5
-            else:
-                pos_w = 1.0
+        train_loader_ood = DataLoader(train_set_ood, batch_size=batch_size_sampled_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
         
         if args.scheduler == 'multistep':
-            if args.training == 'binary':
-                trainer(train_loader_id, train_loader_ood, clf, optimizer, linear_optimizer, beta=args.beta, pos_w=pos_w)
-            else:
-                trainer(train_loader_id, train_loader_ood, clf, optimizer, linear_optimizer, beta=args.beta)
+            trainer(train_loader_id, train_loader_ood, clf, optimizer, linear_optimizer, beta=args.beta)
             scheduler.step()
             linear_scheduler.step()
         elif args.scheduler == 'lambda':
-            if args.training == 'binary':
-                trainer(train_loader_id, train_loader_ood, clf, optimizer, linear_optimizer, scheduler, linear_scheduler, beta=args.beta, pos_w=pos_w)
-            else:
-                trainer(train_loader_id, train_loader_ood, clf, optimizer, linear_optimizer, scheduler, linear_scheduler, beta=args.beta)
+            trainer(train_loader_id, train_loader_ood, clf, optimizer, linear_optimizer, scheduler, linear_scheduler, beta=args.beta)
         else:
             raise RuntimeError('<<< Invalid scheduler: {}'.format(args.scheduler))
         val_metrics = test(test_loader_id, clf, num_classes)
@@ -211,19 +194,20 @@ def main(args):
             flush=True
         )
 
-        torch.save({
-            'epoch': epoch,
-            'arch': args.arch,
-            'state_dict': copy.deepcopy(clf.state_dict()),
-            'optimizer': copy.deepcopy(optimizer.state_dict()),
-            'linear_optimizer': copy.deepcopy(linear_optimizer.state_dict()),
-            'scheduler': copy.deepcopy(scheduler.state_dict()),
-            'linear_scheduler': copy.deepcopy(linear_scheduler.state_dict()),
-            'cla_acc': cla_acc
-        }, str(exp_path / (str(epoch)+'.pth')))
+        if epoch % args.save_freq == 0:
+            torch.save({
+                'epoch': epoch,
+                'arch': args.arch,
+                'state_dict': copy.deepcopy(clf.state_dict()),
+                'optimizer': copy.deepcopy(optimizer.state_dict()),
+                'linear_optimizer': copy.deepcopy(linear_optimizer.state_dict()),
+                'scheduler': copy.deepcopy(scheduler.state_dict()),
+                'linear_scheduler': copy.deepcopy(linear_scheduler.state_dict()),
+                'cla_acc': cla_acc
+            }, str(exp_path / (str(epoch)+'.pth')))
 
     # Total sampled imgs number
-    print('Total:', len(all_indices_sampled_ood))
+    # print('Total:', len(all_indices_sampled_ood))
     
     torch.save({
         'epoch': epoch,
@@ -241,13 +225,11 @@ if __name__ == '__main__':
     parser.add_argument('--seed', default=42, type=int, help='seed for init training')
     parser.add_argument('--data_dir', help='directory to store datasets', default='/data/cv')
     parser.add_argument('--id', type=str, default='cifar10')
-    parser.add_argument('--ood', type=str, default='tiny_images')
-    parser.add_argument('--training', type=str, default='uni', choices=['uni', 'abs', 'energy', 'binary'])
-    parser.add_argument('--weighting', type=str, default='abs', choices=['msp', 'abs', 'energy', 'binary'])
-    parser.add_argument('--beta', type=float, default=0.5)
-    parser.add_argument('--include_binary', action='store_true')
+    parser.add_argument('--ood', type=str, default='ti_300k', choices=['ti_300k', 'tiny_images', 'imagenet_64'])
+    parser.add_argument('--training', type=str, default='energy', choices=['uni', 'abs', 'energy'])
+    parser.add_argument('--beta', type=float, default=0.1)
     parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='esd')
-    parser.add_argument('--arch', type=str, default='wrn40')
+    parser.add_argument('--arch', type=str, default='densenet101', choices=['densenet101', 'wrn40'])
     parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--weight_decay', type=float, default=0.0001)
     parser.add_argument('--linear_weight_decay', type=float, default=0.0001)
@@ -255,10 +237,12 @@ if __name__ == '__main__':
     parser.add_argument('--lr_stones', nargs='+', default=[0.5, 0.75, 0.9]) # specify for multistep scheduler
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--print_freq', type=int, default=101)
+    parser.add_argument('--save_freq', type=int, default=10)
     parser.add_argument('--batch_size', type=int, default=64)
-    parser.add_argument('--batch_size_ood', type=int, default=3072)
-    parser.add_argument('--candidate_ood_size', type=int, default=2 ** 20)
-    parser.add_argument('--sampled_ood_size_factor', type=int, default=2)
+    parser.add_argument('--size_candidate_ood', type=int, default=300000)
+    parser.add_argument('--batch_size_candidate_ood', type=int, default=3072)
+    parser.add_argument('--size_factor_sampled_ood', type=int, default=1)
     parser.add_argument('--prefetch', type=int, default=0, help='number of dataloader workers')
     parser.add_argument('--gpu_idx', help='used gpu idx', type=int, default=0)
     args = parser.parse_args()

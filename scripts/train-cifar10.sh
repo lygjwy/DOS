@@ -1,14 +1,7 @@
-# Train CIFAR10 CLF
-## regular training
-# python train.py --dataset cifar10
+# Train CIFAR10 CLF: tune loss regulating coefficient with different seeds
 
-## random sampling
-# python train_rand_resa.py --id cifar10 --ood tiny_images
+seeds='3 14 42'
 
-## confidence sampling
-python train_conf_resa.py --id cifar10 --ood tiny_images --ood_quantile 0.0
-python train_conf_resa.py --id cifar10 --ood tiny_images --ood_quantile 0.125
-
-## density sampling
-python train_dens_resa.py --id cifar10 --ood tiny_images --ood_quantile 0.0
-python train_dens_resa.py --id cifar10 --ood tiny_images --ood_quantile 0.125
+for seed in $seeds; do
+    python train_dual_batch.py --seed $seed --id cifar10 --ood ti_300k --ood_ratio 0.9 --gpu_idx 0
+done

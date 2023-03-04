@@ -1,6 +1,6 @@
 '''
 80 million Tiny Images Dataset (https://groups.csail.mit.edu/vision/TinyImages/)
-Code adapted from from https://github.com/hendrycks/outlier-exposure
+Code adapted from https://github.com/hendrycks/outlier-exposure
 '''
 
 import numpy as np

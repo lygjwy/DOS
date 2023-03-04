@@ -65,6 +65,42 @@ def get_logit_score(data_loader, clf):
 
     return logit_score
 
+def get_odin_score(data_loader, clf, temperature=1000.0, magnitude=0.0014, std=(0.2470, 0.2435, 0.2616)):
+    clf.eval()
+    
+    odin_scores = []
+    
+    for sample in data_loader:
+        data = sample['data'].cuda()
+        
+        data.requires_grad = True
+        logit = clf(data)
+        pred = logit.detach().argmax(axis=1)
+        logit = logit / temperature
+        criterion = nn.CrossEntropyLoss()
+        loss = criterion(logit, pred)
+        loss.backward()
+        
+        # normalizing the gradient to binary in {-1, 1}
+        gradient = torch.ge(data.grad.detach(), 0)
+        gradient = (gradient.float() - 0.5) * 2
+        
+        gradient[:, 0] = gradient[:, 0] / std[0]
+        gradient[:, 1] = gradient[:, 1] / std[1]
+        gradient[:, 2] = gradient[:, 2] / std[2]
+        
+        tmpInputs = torch.add(data.detach(), -magnitude, gradient)
+        logit = clf(tmpInputs)
+        logit = logit / temperature
+        # calculating the confidence after add the perturbation
+        nnOutput = logit.detach()
+        nnOutput = nnOutput - nnOutput.max(dim=1, keepdims=True).values
+        nnOutput = nnOutput.exp() / nnOutput.exp().sum(dim=1, keepdims=True)
+        
+        odin_scores.extend(nnOutput.max(dim=1)[0].tolist())
+    
+    return odin_scores
+
 def sample_estimator(data_loader, clf, num_classes):
     clf.eval()
     group_lasso = EmpiricalCovariance(assume_centered=False)
@@ -147,24 +183,6 @@ def get_energy_score(data_loader, clf, temperature=1.0):
     
     return energy_score
 
-def get_binary_score(data_loader, clf):
-    clf.eval()
-
-    binary_score = []
-    for sample in data_loader:
-        data = sample['data'].cuda()
-
-        with torch.no_grad():
-            if args.include_binary:
-                logit, _ = clf(data)
-            else:
-                logit = clf(data)
-            energy =-torch.logsumexp(logit, dim=1)
-            energy_prob = torch.sigmoid(energy).squeeze().tolist()
-            binary_score.extend(energy_prob)
-    
-    return [-1.0 * bs + 1.0 for bs in binary_score]
-
 def get_acc(data_loader, clf, num_classes):
     clf.eval()
     correct, total = 0, 0
@@ -185,16 +203,16 @@ def get_acc(data_loader, clf, num_classes):
 
 score_dic = {
     'msp': get_msp_score,
+    'odin': get_odin_score,
     'abs': get_abs_score,
     'logit': get_logit_score,
     'maha': get_mahalanobis_score,
-    'energy': get_energy_score,
-    'binary': get_binary_score
+    'energy': get_energy_score
 }
 
 def main(args):
 
-    # _, std = get_ds_info(args.id, 'mean_and_std')
+    _, std = get_ds_info(args.id, 'mean_and_std')
     test_trf_id = get_ds_trf(args.id, 'test')
     test_set_id = get_ds(root=args.data_dir, ds_name=args.id, split='test', transform=test_trf_id)
     test_loader_id = DataLoader(test_set_id, batch_size=args.batch_size, shuffle=False, num_workers=args.prefetch, pin_memory=True)
@@ -208,9 +226,9 @@ def main(args):
     # load CLF
     num_classes = len(get_ds_info(args.id, 'classes'))
     if args.score == 'abs':
-        clf = get_clf(args.arch, num_classes+1, args.include_binary)
-    elif args.score in ['maha', 'logit', 'energy', 'msp', 'binary']:
-        clf = get_clf(args.arch, num_classes, args.include_binary)
+        clf = get_clf(args.arch, num_classes+1)
+    elif args.score in ['maha', 'logit', 'energy', 'msp', 'odin']:
+        clf = get_clf(args.arch, num_classes)
     else:
         raise RuntimeError('<<< Invalid score: '.format(args.score))
     
@@ -231,7 +249,7 @@ def main(args):
         torch.cuda.set_device(gpu_idx)
         clf.cuda()
         torch.cuda.manual_seed(args.seed)
-    cudnn.benchmark = True
+    cudnn.benchmark = False
 
     # get_acc(test_loader_id, clf, num_classes)
 
@@ -245,6 +263,13 @@ def main(args):
             num_classes=num_classes, 
             sample_mean=cat_mean, 
             precision=precision
+        )
+    elif args.score == 'odin':
+        get_score = partial(
+            score_dic['odin'],
+            temperature=args.temperature,
+            magnitude=args.magnitude,
+            std=std
         )
     else:
         get_score = score_dic[args.score]
@@ -311,13 +336,12 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', type=str, default='/data/cv')
     parser.add_argument('--id', type=str, default='cifar10')
     parser.add_argument('--oods', nargs='+', default=['svhn', 'lsunc', 'dtd', 'places365_10k', 'cifar100', 'tinc', 'lsunr', 'tinr', 'isun'])
-    parser.add_argument('--score', type=str, default='msp', choices=['msp', 'abs', 'logit', 'maha', 'energy', 'binary'])
-    # parser.add_argument('--temperature', type=int, default=1000)
-    # parser.add_argument('--magnitude', type=float, default=0.0014)
+    parser.add_argument('--score', type=str, default='msp', choices=['msp', 'odin', 'abs', 'logit', 'maha', 'energy'])
+    parser.add_argument('--temperature', type=int, default=1000)
+    parser.add_argument('--magnitude', type=float, default=0.0014)
     parser.add_argument('--batch_size', type=int, default=200)
     parser.add_argument('--prefetch', type=int, default=16)
-    parser.add_argument('--arch', type=str, default='wrn40')
-    parser.add_argument('--include_binary', action='store_true')
+    parser.add_argument('--arch', type=str, default='densenet101', choices=['densenet101', 'wrn40'])
     parser.add_argument('--pretrain', type=str, default=None, help='path to pre-trained model')
     parser.add_argument('--fig_name', type=str, default='test.png')
     parser.add_argument('--gpu_idx', type=int, default=0)
