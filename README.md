@@ -27,7 +27,7 @@
 ## Get Started
 ### Overview
 This repository is an official PyTorch implementation of the ICLR 2024 paper 'DOS: Diverse Outlier Sampling for Out-of-Distribution Detection'. The illustration of our algorithm is shown as below:
-![diagram](https://github.com/lygjwy/DOS/blob/main/diagram.png)
+![diagram](https://github.com/lygjwy/DOS/blob/main/figs/diagram.png)
 
 ### Requirements
 ```bash
@@ -46,7 +46,7 @@ python detect.py --id cifar100 --ood $OODs --score abs --pretrain /path/to/train
 ```
 
 ### Results
-![diagram](https://github.com/lygjwy/DOS/blob/main/result.png)
+![diagram](https://github.com/lygjwy/DOS/blob/main/figs/result.png)
 
 ## Citation
 If you find our repository useful for your research, please consider citing our paper:

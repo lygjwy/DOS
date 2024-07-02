@@ -1,6 +1,6 @@
 import numpy as np
 
-seed = 2
+seed = 1
 epochs = 100
 
 epoch_seeds = [seed]

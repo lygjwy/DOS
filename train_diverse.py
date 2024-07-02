@@ -19,7 +19,7 @@ from torch.utils.data import Subset, DataLoader
 from models import get_clf
 from utils import setup_logger
 from datasets import get_ds_info, get_ds_trf, get_ood_trf, get_ds
-from scores import get_weight
+
 
 def init_seeds(seed):
     random.seed(seed)
@@ -65,7 +65,7 @@ def cosine_annealing(step, total_steps, lr_max, lr_min):
 def main(args):
 
     init_seeds(args.seed)
-    exp_path = Path(args.output_dir) / ('s' + str(args.seed)) / (args.id  + '-' + args.ood) / '-'.join([args.arch, 'abs', args.scheduler, 'b_'+str(args.beta), 'bs_'+str(args.batch_size), 'dos_k_'+str(args.num_cluster)])
+    exp_path = Path(args.output_dir) / ('s' + str(args.seed)) / (args.id  + '-' + args.ood) / '-'.join([args.arch, 'abs', args.scheduler, 'b_'+str(args.beta), 'bs_'+str(args.batch_size), 'k_'+str(args.num_cluster)])
     exp_path.mkdir(parents=True, exist_ok=True)
 
     setup_logger(str(exp_path), 'console.log')
@@ -279,8 +279,8 @@ if __name__ == '__main__':
     parser.add_argument('--size_candidate_ood', type=int, default=300000)
     parser.add_argument('--size_factor_sampled_ood', type=int, default=1)
 
-    parser.add_argument('--num_cluster', type=int, default=64) # 192: 24(8) -> 64: 8
-    parser.add_argument('--n_init', type=int, default=3)
+    parser.add_argument('--num_cluster', type=int, default=64)
+    parser.add_argument('--n_init', type=int, default=5)
     parser.add_argument('--prefetch', type=int, default=4, help='number of dataloader workers')
     parser.add_argument('--gpu_idx', help='used gpu idx', type=int, default=0)
     args = parser.parse_args()
