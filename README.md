@@ -31,27 +31,27 @@ This repository is an official PyTorch implementation of ICLR 2024 paper 'DOS: D
 ![diagram](https://github.com/lygjwy/DOS/blob/main/diagram.png)
 
 ### Requirements
-'''
+```bash
 pip install -r requirements.txt
-'''
+```
 
 ### Training
-'''
+```bash
 python train_diverse.py
-'''
+```
 
 ### Evaluation
-'''
+```bash
 OODs="svhn lsunc dtd places365_10k tinc lsunr tinr isun"
 python detect.py --id cifar100 --ood $OODs --score abs --pretrain /path/to/trained/classifier
-'''
+```
 
 ### Results
 ![diagram](https://github.com/lygjwy/DOS/blob/main/result.png)
 
 ## Citation
 If you find our repository useful for your research, please consider citing our paper:
-'''
+```
 @inproceedings{
 jiang2024dos,
 title={{DOS}: Diverse Outlier Sampling for Out-of-Distribution Detection},
@@ -60,4 +60,4 @@ booktitle={The Twelfth International Conference on Learning Representations},
 year={2024},
 url={https://openreview.net/forum?id=iriEqxFB4y}
 }
-'''
+```
