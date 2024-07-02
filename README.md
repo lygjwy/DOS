@@ -5,7 +5,7 @@
 </h1>
 
 <h4 align="center">
-  An official PyTorch implementation of ICLR 2024 paper
+  An official PyTorch implementation of the ICLR 2024 paper
   <br>
   "DOS: Diverse Outlier Sampling for Out-of-Distribution Detection"
 </h4>
@@ -21,13 +21,12 @@
 
 <p align="center">
   <a href="#get-started">Get Started</a> •
-  <a href="#acknowledgements">Acknowledgements</a> •
   <a href="#citation">Citation</a>
 </p>
 
 ## Get Started
 ### Overview
-This repository is an official PyTorch implementation of ICLR 2024 paper 'DOS: Diverse Outlier Sampling for Out-of-Distribution Detection'. The illustration of our algorithm is shown as below:
+This repository is an official PyTorch implementation of the ICLR 2024 paper 'DOS: Diverse Outlier Sampling for Out-of-Distribution Detection'. The illustration of our algorithm is shown as below:
 ![diagram](https://github.com/lygjwy/DOS/blob/main/diagram.png)
 
 ### Requirements
@@ -52,12 +51,11 @@ python detect.py --id cifar100 --ood $OODs --score abs --pretrain /path/to/train
 ## Citation
 If you find our repository useful for your research, please consider citing our paper:
 ```
-@inproceedings{
-jiang2024dos,
-title={{DOS}: Diverse Outlier Sampling for Out-of-Distribution Detection},
-author={Wenyu Jiang and Hao Cheng and MingCai Chen and Chongjun Wang and Hongxin Wei},
-booktitle={The Twelfth International Conference on Learning Representations},
-year={2024},
-url={https://openreview.net/forum?id=iriEqxFB4y}
+@inproceedings{jiang2024dos,
+  title={{DOS}: Diverse Outlier Sampling for Out-of-Distribution Detection},
+  author={Wenyu Jiang and Hao Cheng and MingCai Chen and Chongjun Wang and Hongxin Wei},
+  booktitle={The Twelfth International Conference on Learning Representations},
+  year={2024},
+  url={https://openreview.net/forum?id=iriEqxFB4y}
 }
 ```
